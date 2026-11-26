@@ -1,0 +1,8 @@
+{
+  "name": "Sweet Studio",
+  "description": "Специализированное рабочее пространство кондитера — рецепты, калькулятор себестоимости, склад FEFO, заказы, производство, клиенты, финансы и команда.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

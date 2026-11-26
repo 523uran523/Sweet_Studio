@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="0"] {
+  --bg: #FBF6F4;
+  --card: #FFFFFF;
+  --accent: #A45C7A;
+  --accent-ink: #FFFFFF;
+  --soft: #EEDCE5;
+  --ink: #49333F;
+  --green: #E3EBD9;
+  --green-ink: #2E4B26;
+  --warm: #F3E4D5;
+  --warm-ink: #6B4423;
+  --muted: #796B74;
+  --line: rgba(73, 51, 63, 0.12);
+  --danger: #B42318;
+  --danger-bg: #FEE4E2;
+  --is-dark: 0;
+}
+
+[data-theme="1"] {
+  --bg: #F8F6EE;
+  --card: #FFFFFF;
+  --accent: #748B64;
+  --accent-ink: #FFFFFF;
+  --soft: #E4EBD8;
+  --ink: #394335;
+  --green: #E7EDDA;
+  --green-ink: #2C4623;
+  --warm: #F1E2CE;
+  --warm-ink: #66421F;
+  --muted: #72796A;
+  --line: rgba(57, 67, 53, 0.12);
+  --danger: #B42318;
+  --danger-bg: #FEE4E2;
+  --is-dark: 0;
+}
+
+[data-theme="2"] {
+  --bg: #F2F4F7;
+  --card: #FFFFFF;
+  --accent: #647B9D;
+  --accent-ink: #FFFFFF;
+  --soft: #E0E7F0;
+  --ink: #273344;
+  --green: #E3EAE8;
+  --green-ink: #1F493E;
+  --warm: #EDE6DC;
+  --warm-ink: #624726;
+  --muted: #687586;
+  --line: rgba(39, 51, 68, 0.12);
+  --danger: #B42318;
+  --danger-bg: #FEE4E2;
+  --is-dark: 0;
+}
+
+[data-theme="3"] {
+  --bg: #211C20;
+  --card: #30282D;
+  --accent: #D4A4B8;
+  --accent-ink: #211C20;
+  --soft: #49343F;
+  --ink: #F3E8ED;
+  --green: #35443B;
+  --green-ink: #CFE6D7;
+  --warm: #493B30;
+  --warm-ink: #F1D9C4;
+  --muted: #C1AEB8;
+  --line: rgba(243, 232, 237, 0.14);
+  --danger: #FDA29B;
+  --danger-bg: rgba(180, 35, 24, 0.24);
+  --is-dark: 1;
+}
+
+@layer base {
+  html, body {
+    background-color: var(--bg);
+    color: var(--ink);
+    font-family: "DM Sans", system-ui, -apple-system, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: "Plus Jakarta Sans", "DM Sans", system-ui, sans-serif;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  button, a, input, select, textarea {
+    outline-color: var(--accent);
+  }
+
+  *:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,728 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and active workspace pointer",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "activeWorkspaceId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "createdAt", "updatedAt"]
+    },
+    "Workspace": {
+      "title": "Workspace",
+      "description": "Pastry business workspace (Home / Studio / Network) with subscription state",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "slogan": { "type": "string", "maxLength": 200 },
+        "businessFormat": { "type": "string", "enum": ["home", "studio", "network"] },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "memberUids": { "type": "array" },
+        "themeIndex": { "type": "integer" },
+        "density": { "type": "string", "enum": ["standard", "compact", "spacious"] },
+        "pins": { "type": "array" },
+        "hiddenModules": { "type": "array" },
+        "demoLoaded": { "type": "boolean" },
+        "plan": { "type": "string", "enum": ["trial", "pro"] },
+        "subscriptionStatus": { "type": "string", "enum": ["trialing", "active", "past_due", "expired"] },
+        "trialEndsAt": { "type": "string", "maxLength": 40 },
+        "currentPeriodEnd": { "type": "string", "maxLength": 40 },
+        "graceEndsAt": { "type": "string", "maxLength": 40 },
+        "billingEmail": { "type": "string", "maxLength": 200 },
+        "lastPaymentId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "businessFormat", "ownerId", "createdAt", "updatedAt"]
+    },
+    "WorkspaceInvitation": {
+      "title": "WorkspaceInvitation",
+      "description": "Single-use email-targeted invitation for an employee to join a workspace",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "workspaceName": { "type": "string", "maxLength": 120 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 200 },
+        "invitedByName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "confectioner", "seller", "marketer", "storekeeper", "accountant"] },
+        "payType": { "type": "string", "enum": ["hourly", "piece", "percent", "salary", "mixed"] },
+        "rateCents": { "type": "integer" },
+        "percent": { "type": "number" },
+        "allowedRecipeIds": { "type": "array" },
+        "locationId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "accepted", "revoked"] },
+        "acceptedByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "workspaceName", "ownerId", "email", "role", "payType", "status", "createdAt", "updatedAt"]
+    },
+    "WorkspaceMember": {
+      "title": "WorkspaceMember",
+      "description": "Team member or employee inside a workspace with role, allowed recipes, and pay conditions",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "inviteId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 200 },
+        "role": { "type": "string", "enum": ["owner", "admin", "confectioner", "seller", "marketer", "storekeeper", "accountant"] },
+        "payType": { "type": "string", "enum": ["hourly", "piece", "percent", "salary", "mixed"] },
+        "rateCents": { "type": "integer" },
+        "percent": { "type": "number" },
+        "allowedRecipeIds": { "type": "array" },
+        "locationId": { "type": "string", "maxLength": 128 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "name", "role", "payType", "active", "createdAt", "updatedAt"]
+    },
+    "Location": {
+      "title": "Location",
+      "description": "Kitchen, studio, or retail store location",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "kind": { "type": "string", "enum": ["kitchen", "store", "warehouse"] },
+        "address": { "type": "string", "maxLength": 240 },
+        "isDefault": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "name", "kind", "createdAt", "updatedAt"]
+    },
+    "Recipe": {
+      "title": "Recipe",
+      "description": "Pastry recipe and versioned tech card with ingredients and labor",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "category": { "type": "string", "maxLength": 60 },
+        "version": { "type": "integer" },
+        "status": { "type": "string", "enum": ["draft", "review", "approved", "archived"] },
+        "yieldGrams": { "type": "number" },
+        "grossGrams": { "type": "number" },
+        "yieldPortions": { "type": "integer" },
+        "formSize": { "type": "string", "maxLength": 60 },
+        "photoUrl": { "type": "string", "maxLength": 240000 },
+        "ingredients": { "type": "array" },
+        "packVariants": { "type": "array" },
+        "steps": { "type": "array" },
+        "allergens": { "type": "array" },
+        "laborHours": { "type": "number" },
+        "laborRateCents": { "type": "integer" },
+        "packagingCents": { "type": "integer" },
+        "overheadPercent": { "type": "number" },
+        "marginPercent": { "type": "number" },
+        "costCents": { "type": "integer" },
+        "recommendedPriceCents": { "type": "integer" },
+        "shelfLifeHours": { "type": "integer" },
+        "storageCondition": { "type": "string", "maxLength": 120 },
+        "favorite": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "title", "category", "version", "status", "yieldGrams", "costCents", "recommendedPriceCents", "createdAt", "updatedAt"]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Ingredient, semi-finished, finished good, or packaging item",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "kind": { "type": "string", "enum": ["raw", "semi", "finished", "packaging"] },
+        "category": { "type": "string", "maxLength": 80 },
+        "unit": { "type": "string", "maxLength": 24 },
+        "qtyOnHand": { "type": "number" },
+        "minQty": { "type": "number" },
+        "avgCostCents": { "type": "integer" },
+        "density": { "type": "number" },
+        "locationId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "name", "kind", "unit", "qtyOnHand", "avgCostCents", "createdAt", "updatedAt"]
+    },
+    "StockLot": {
+      "title": "StockLot",
+      "description": "FEFO inventory batch with expiry and quarantine status",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "itemId": { "type": "string", "maxLength": 128 },
+        "itemName": { "type": "string", "maxLength": 140 },
+        "lotCode": { "type": "string", "maxLength": 60 },
+        "unit": { "type": "string", "maxLength": 24 },
+        "initialQty": { "type": "number" },
+        "remainingQty": { "type": "number" },
+        "unitCostCents": { "type": "integer" },
+        "locationId": { "type": "string", "maxLength": 128 },
+        "expiresAt": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["active", "quarantine", "expired", "depleted"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "itemId", "itemName", "lotCode", "unit", "initialQty", "remainingQty", "unitCostCents", "status", "createdAt", "updatedAt"]
+    },
+    "StockMovement": {
+      "title": "StockMovement",
+      "description": "Stock receipt, consumption, transfer, or production movement record",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "kind": { "type": "string", "enum": ["receipt", "issue", "transfer", "adjustment", "production_in", "production_out", "sale"] },
+        "itemId": { "type": "string", "maxLength": 128 },
+        "itemName": { "type": "string", "maxLength": 140 },
+        "lotId": { "type": "string", "maxLength": 128 },
+        "qty": { "type": "number" },
+        "unit": { "type": "string", "maxLength": 24 },
+        "totalCents": { "type": "integer" },
+        "reason": { "type": "string", "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "kind", "itemId", "itemName", "qty", "unit", "totalCents", "createdAt", "updatedAt"]
+    },
+    "StockTransfer": {
+      "title": "StockTransfer",
+      "description": "Inter-location stock transfer preserving lot lineage and unit cost",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "itemId": { "type": "string", "maxLength": 128 },
+        "itemName": { "type": "string", "maxLength": 140 },
+        "lotId": { "type": "string", "maxLength": 128 },
+        "fromLocationId": { "type": "string", "maxLength": 128 },
+        "fromLocationName": { "type": "string", "maxLength": 120 },
+        "toLocationId": { "type": "string", "maxLength": 128 },
+        "toLocationName": { "type": "string", "maxLength": 120 },
+        "qty": { "type": "number" },
+        "unit": { "type": "string", "maxLength": 24 },
+        "unitCostCents": { "type": "integer" },
+        "status": { "type": "string", "enum": ["in_transit", "received", "cancelled"] },
+        "note": { "type": "string", "maxLength": 200 },
+        "sentAt": { "type": "string", "maxLength": 40 },
+        "receivedAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "itemId", "itemName", "fromLocationName", "toLocationName", "qty", "unit", "unitCostCents", "status", "sentAt", "createdAt", "updatedAt"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Ingredient and packaging supplier",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "contactName": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "category": { "type": "string", "maxLength": 80 },
+        "debtCents": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "name", "createdAt", "updatedAt"]
+    },
+    "Purchase": {
+      "title": "Purchase",
+      "description": "Supplier purchase order and receipt",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "supplierId": { "type": "string", "maxLength": 128 },
+        "supplierName": { "type": "string", "maxLength": 140 },
+        "itemId": { "type": "string", "maxLength": 128 },
+        "itemName": { "type": "string", "maxLength": 140 },
+        "qty": { "type": "number" },
+        "unit": { "type": "string", "maxLength": 24 },
+        "priceCents": { "type": "integer" },
+        "deliveryCents": { "type": "integer" },
+        "expectedDate": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["planned", "ordered", "received", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "supplierName", "itemName", "qty", "unit", "priceCents", "status", "createdAt", "updatedAt"]
+    },
+    "Client": {
+      "title": "Client",
+      "description": "Pastry customer profile with preferences, allergens, and deposit",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 160 },
+        "source": { "type": "string", "maxLength": 80 },
+        "address": { "type": "string", "maxLength": 240 },
+        "preferences": { "type": "string", "maxLength": 400 },
+        "allergens": { "type": "string", "maxLength": 240 },
+        "depositCents": { "type": "integer" },
+        "ordersCount": { "type": "integer" },
+        "debtCents": { "type": "integer" },
+        "favorite": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "name", "createdAt", "updatedAt"]
+    },
+    "Lead": {
+      "title": "Lead",
+      "description": "Incoming inquiry before conversion to a confirmed order",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "clientName": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "requestText": { "type": "string", "maxLength": 400 },
+        "source": { "type": "string", "maxLength": 80 },
+        "budgetCents": { "type": "integer" },
+        "nextStep": { "type": "string", "maxLength": 160 },
+        "status": { "type": "string", "enum": ["new", "contacted", "quoted", "converted", "lost"] },
+        "convertedOrderId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "clientName", "requestText", "status", "createdAt", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer cake/pastry order with recipe snapshot and payment state",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "orderNumber": { "type": "string", "maxLength": 40 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "clientName": { "type": "string", "maxLength": 140 },
+        "recipeId": { "type": "string", "maxLength": 128 },
+        "recipeTitle": { "type": "string", "maxLength": 140 },
+        "weightGrams": { "type": "number" },
+        "priceCents": { "type": "integer" },
+        "costCents": { "type": "integer" },
+        "prepaymentCents": { "type": "integer" },
+        "paidCents": { "type": "integer" },
+        "discountCents": { "type": "integer" },
+        "couponCode": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["lead", "negotiation", "confirmed", "in_progress", "ready", "delivered", "closed", "cancelled"] },
+        "dueDate": { "type": "string", "maxLength": 40 },
+        "assigneeName": { "type": "string", "maxLength": 120 },
+        "locationName": { "type": "string", "maxLength": 120 },
+        "deliveryAddress": { "type": "string", "maxLength": 240 },
+        "wishes": { "type": "string", "maxLength": 400 },
+        "allergens": { "type": "string", "maxLength": 240 },
+        "stockDeducted": { "type": "boolean" },
+        "favorite": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "orderNumber", "title", "clientName", "priceCents", "costCents", "paidCents", "status", "createdAt", "updatedAt"]
+    },
+    "WorkItem": {
+      "title": "WorkItem",
+      "description": "Unified work task across orders, production, promo, quality, procurement, and finance",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["order", "production", "promo", "quality", "task", "purchase", "finance"] },
+        "sourceId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "assigneeName": { "type": "string", "maxLength": 120 },
+        "locationName": { "type": "string", "maxLength": 120 },
+        "dueDate": { "type": "string", "maxLength": 40 },
+        "priority": { "type": "string", "enum": ["low", "normal", "high"] },
+        "stage": { "type": "string", "enum": ["queue", "in_progress", "done"] },
+        "tags": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "type", "title", "stage", "priority", "createdAt", "updatedAt"]
+    },
+    "ProductionRun": {
+      "title": "ProductionRun",
+      "description": "Kitchen production batch run",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "recipeId": { "type": "string", "maxLength": 128 },
+        "recipeTitle": { "type": "string", "maxLength": 140 },
+        "plannedGrams": { "type": "number" },
+        "actualGrams": { "type": "number" },
+        "locationName": { "type": "string", "maxLength": 120 },
+        "assigneeName": { "type": "string", "maxLength": 120 },
+        "totalCostCents": { "type": "integer" },
+        "status": { "type": "string", "enum": ["planned", "in_progress", "completed", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "recipeTitle", "plannedGrams", "status", "createdAt", "updatedAt"]
+    },
+    "Account": {
+      "title": "Account",
+      "description": "Cash register, bank card, or business account",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "type": { "type": "string", "enum": ["cash", "bank", "card", "acquiring"] },
+        "balanceCents": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "name", "type", "balanceCents", "createdAt", "updatedAt"]
+    },
+    "MoneyTransaction": {
+      "title": "MoneyTransaction",
+      "description": "Financial transaction (income, expense, transfer, reversal)",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "kind": { "type": "string", "enum": ["income", "expense", "transfer", "reversal"] },
+        "category": { "type": "string", "maxLength": 80 },
+        "amountCents": { "type": "integer" },
+        "accountId": { "type": "string", "maxLength": 128 },
+        "accountName": { "type": "string", "maxLength": 100 },
+        "orderId": { "type": "string", "maxLength": 128 },
+        "reversesId": { "type": "string", "maxLength": 128 },
+        "note": { "type": "string", "maxLength": 240 },
+        "occurredAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "kind", "category", "amountCents", "accountId", "occurredAt", "createdAt", "updatedAt"]
+    },
+    "RecurringPayment": {
+      "title": "RecurringPayment",
+      "description": "Recurring expense like rent or utilities",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "amountCents": { "type": "integer" },
+        "cadence": { "type": "string", "enum": ["monthly", "weekly"] },
+        "nextDueDate": { "type": "string", "maxLength": 40 },
+        "category": { "type": "string", "maxLength": 80 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "title", "amountCents", "cadence", "nextDueDate", "active", "createdAt", "updatedAt"]
+    },
+    "CashShift": {
+      "title": "CashShift",
+      "description": "POS cashier shift with opening cash, sales totals, and Z-report discrepancy",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "locationId": { "type": "string", "maxLength": 128 },
+        "locationName": { "type": "string", "maxLength": 120 },
+        "accountId": { "type": "string", "maxLength": 128 },
+        "cashierName": { "type": "string", "maxLength": 120 },
+        "openedAt": { "type": "string", "maxLength": 40 },
+        "closedAt": { "type": "string", "maxLength": 40 },
+        "openingCashCents": { "type": "integer" },
+        "cashSalesCents": { "type": "integer" },
+        "cardSalesCents": { "type": "integer" },
+        "refundsCents": { "type": "integer" },
+        "cashInCents": { "type": "integer" },
+        "cashOutCents": { "type": "integer" },
+        "salesCount": { "type": "integer" },
+        "closingActualCashCents": { "type": "integer" },
+        "closingDiscrepancyCents": { "type": "integer" },
+        "status": { "type": "string", "enum": ["open", "closed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "locationName", "accountId", "cashierName", "openedAt", "openingCashCents", "cashSalesCents", "cardSalesCents", "refundsCents", "cashInCents", "cashOutCents", "salesCount", "status", "createdAt", "updatedAt"]
+    },
+    "PosSale": {
+      "title": "PosSale",
+      "description": "Retail counter / showcase POS sale receipt",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "receiptNumber": { "type": "string", "maxLength": 40 },
+        "shiftId": { "type": "string", "maxLength": 128 },
+        "locationId": { "type": "string", "maxLength": 128 },
+        "locationName": { "type": "string", "maxLength": 120 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "clientName": { "type": "string", "maxLength": 140 },
+        "cashierName": { "type": "string", "maxLength": 120 },
+        "paymentMethod": { "type": "string", "enum": ["cash", "card"] },
+        "accountId": { "type": "string", "maxLength": 128 },
+        "lines": { "type": "array" },
+        "subtotalCents": { "type": "integer" },
+        "discountCents": { "type": "integer" },
+        "totalCents": { "type": "integer" },
+        "costCents": { "type": "integer" },
+        "couponCode": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["completed", "refunded"] },
+        "occurredAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "receiptNumber", "cashierName", "paymentMethod", "accountId", "lines", "subtotalCents", "discountCents", "totalCents", "costCents", "status", "occurredAt", "createdAt", "updatedAt"]
+    },
+    "BillingEvent": {
+      "title": "BillingEvent",
+      "description": "Idempotent SaaS subscription payment record",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "idempotencyKey": { "type": "string", "maxLength": 128 },
+        "plan": { "type": "string", "enum": ["pro"] },
+        "amountCents": { "type": "integer" },
+        "periodMonths": { "type": "integer" },
+        "status": { "type": "string", "enum": ["paid", "failed"] },
+        "provider": { "type": "string", "maxLength": 60 },
+        "occurredAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "idempotencyKey", "plan", "amountCents", "periodMonths", "status", "provider", "occurredAt", "createdAt", "updatedAt"]
+    },
+    "Coupon": {
+      "title": "Coupon",
+      "description": "Single-use loyalty coupon with atomic redemption state",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "minLength": 3, "maxLength": 40 },
+        "clientId": { "type": "string", "maxLength": 128 },
+        "clientName": { "type": "string", "maxLength": 140 },
+        "discountType": { "type": "string", "enum": ["percent", "fixed"] },
+        "discountValue": { "type": "integer" },
+        "minOrderCents": { "type": "integer" },
+        "expiresAt": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["active", "redeemed", "expired"] },
+        "redeemedOrderId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "code", "discountType", "discountValue", "status", "createdAt", "updatedAt"]
+    },
+    "Complaint": {
+      "title": "Complaint",
+      "description": "Quality issue or customer feedback linked to order or batch",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "orderId": { "type": "string", "maxLength": 128 },
+        "lotId": { "type": "string", "maxLength": 128 },
+        "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+        "status": { "type": "string", "enum": ["open", "investigating", "resolved"] },
+        "responsibleName": { "type": "string", "maxLength": 120 },
+        "resolution": { "type": "string", "maxLength": 400 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "title", "severity", "status", "createdAt", "updatedAt"]
+    },
+    "ContentPost": {
+      "title": "ContentPost",
+      "description": "Marketing channel publication in content plan",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "channel": { "type": "string", "maxLength": 60 },
+        "channelUrl": { "type": "string", "maxLength": 300 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "scheduledDate": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["idea", "draft", "scheduled", "published"] },
+        "budgetCents": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "channel", "title", "scheduledDate", "status", "createdAt", "updatedAt"]
+    },
+    "PayrollPeriod": {
+      "title": "PayrollPeriod",
+      "description": "Payroll calculation period and closed snapshot",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "startDate": { "type": "string", "maxLength": 40 },
+        "endDate": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["open", "closed"] },
+        "totalAccruedCents": { "type": "integer" },
+        "totalPaidCents": { "type": "integer" },
+        "lines": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "title", "startDate", "endDate", "status", "totalAccruedCents", "totalPaidCents", "createdAt", "updatedAt"]
+    },
+    "TimeEntry": {
+      "title": "TimeEntry",
+      "description": "Work timer session for an employee or task",
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "employeeId": { "type": "string", "maxLength": 128 },
+        "employeeName": { "type": "string", "maxLength": 120 },
+        "orderTitle": { "type": "string", "maxLength": 160 },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "minutes": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["workspaceId", "employeeName", "startedAt", "minutes", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile with active workspace pointer"
+    },
+    "/invitations/{inviteId}": {
+      "schema": { "$ref": "#/entities/WorkspaceInvitation" },
+      "description": "Single-use employee invitations scoped strictly to owner and invited email"
+    },
+    "/workspaces/{workspaceId}": {
+      "schema": { "$ref": "#/entities/Workspace" },
+      "description": "Business workspace root document"
+    },
+    "/workspaces/{workspaceId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/WorkspaceMember" },
+      "description": "Members and employees with roles and pay conditions"
+    },
+    "/workspaces/{workspaceId}/locations/{locationId}": {
+      "schema": { "$ref": "#/entities/Location" },
+      "description": "Workspace locations (kitchens, stores, warehouses)"
+    },
+    "/workspaces/{workspaceId}/recipes/{recipeId}": {
+      "schema": { "$ref": "#/entities/Recipe" },
+      "description": "Pastry recipes and versioned tech cards"
+    },
+    "/workspaces/{workspaceId}/inventoryItems/{itemId}": {
+      "schema": { "$ref": "#/entities/InventoryItem" },
+      "description": "Ingredients, semi-finished, and finished items"
+    },
+    "/workspaces/{workspaceId}/stockLots/{lotId}": {
+      "schema": { "$ref": "#/entities/StockLot" },
+      "description": "FEFO inventory batches"
+    },
+    "/workspaces/{workspaceId}/stockMovements/{movementId}": {
+      "schema": { "$ref": "#/entities/StockMovement" },
+      "description": "Stock movement ledger"
+    },
+    "/workspaces/{workspaceId}/stockTransfers/{transferId}": {
+      "schema": { "$ref": "#/entities/StockTransfer" },
+      "description": "Inter-location stock transfers"
+    },
+    "/workspaces/{workspaceId}/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Suppliers directory"
+    },
+    "/workspaces/{workspaceId}/purchases/{purchaseId}": {
+      "schema": { "$ref": "#/entities/Purchase" },
+      "description": "Purchase orders and deliveries"
+    },
+    "/workspaces/{workspaceId}/clients/{clientId}": {
+      "schema": { "$ref": "#/entities/Client" },
+      "description": "Clients directory with preferences and allergens"
+    },
+    "/workspaces/{workspaceId}/leads/{leadId}": {
+      "schema": { "$ref": "#/entities/Lead" },
+      "description": "Incoming customer inquiries"
+    },
+    "/workspaces/{workspaceId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Customer orders"
+    },
+    "/workspaces/{workspaceId}/workItems/{workItemId}": {
+      "schema": { "$ref": "#/entities/WorkItem" },
+      "description": "Unified Work Hub items (list/kanban/calendar)"
+    },
+    "/workspaces/{workspaceId}/productionRuns/{runId}": {
+      "schema": { "$ref": "#/entities/ProductionRun" },
+      "description": "Production batch runs"
+    },
+    "/workspaces/{workspaceId}/accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/Account" },
+      "description": "Financial accounts"
+    },
+    "/workspaces/{workspaceId}/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/MoneyTransaction" },
+      "description": "Financial transactions ledger"
+    },
+    "/workspaces/{workspaceId}/recurringPayments/{rpId}": {
+      "schema": { "$ref": "#/entities/RecurringPayment" },
+      "description": "Recurring overhead expenses"
+    },
+    "/workspaces/{workspaceId}/cashShifts/{shiftId}": {
+      "schema": { "$ref": "#/entities/CashShift" },
+      "description": "POS cashier shifts and Z-reports"
+    },
+    "/workspaces/{workspaceId}/posSales/{saleId}": {
+      "schema": { "$ref": "#/entities/PosSale" },
+      "description": "POS retail counter sales"
+    },
+    "/workspaces/{workspaceId}/billingEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/BillingEvent" },
+      "description": "Idempotent SaaS subscription payment records"
+    },
+    "/workspaces/{workspaceId}/coupons/{couponId}": {
+      "schema": { "$ref": "#/entities/Coupon" },
+      "description": "Loyalty coupons"
+    },
+    "/workspaces/{workspaceId}/complaints/{complaintId}": {
+      "schema": { "$ref": "#/entities/Complaint" },
+      "description": "Quality complaints and reviews"
+    },
+    "/workspaces/{workspaceId}/contentPosts/{postId}": {
+      "schema": { "$ref": "#/entities/ContentPost" },
+      "description": "Marketing content calendar posts"
+    },
+    "/workspaces/{workspaceId}/payrollPeriods/{periodId}": {
+      "schema": { "$ref": "#/entities/PayrollPeriod" },
+      "description": "Payroll calculation periods"
+    },
+    "/workspaces/{workspaceId}/timeEntries/{entryId}": {
+      "schema": { "$ref": "#/entities/TimeEntry" },
+      "description": "Time tracking entries"
+    }
+  }
+}

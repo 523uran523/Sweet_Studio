@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Copy, PackageMinus, Pencil, Printer, Star, Trash2, Undo2 } from 'lucide-react';
+import { Copy, FileDown, PackageMinus, Pencil, Printer, Star, Trash2, Undo2 } from 'lucide-react';
 import {
   Card,
   Drawer,
@@ -22,6 +22,28 @@ import {
   WorkspaceSnapshot,
 } from '../firebase/workspaceService';
 import { Lead, Order, OrderStatus, Workspace } from '../types/domain';
+import { exportOrderPdf } from '../utils/pdfExporter';
+import {
+  clearFormDraft,
+  formatDraftTimeRu,
+  orderDraftKey,
+  readFormDraft,
+  writeFormDraft,
+} from '../utils/draftStorage';
+
+interface OrderFormDraftData {
+  newTitle: string;
+  newClientId: string;
+  newClient: string;
+  newRecipeId: string;
+  newWeight: number;
+  newPriceRub: string;
+  newDue: string;
+  newDeliveryAddress: string;
+  newAllergens: string;
+  newCouponId: string;
+  newWishes: string;
+}
 
 const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   lead: 'Заявка',
@@ -95,6 +117,93 @@ export function OrdersPage({
   const [newAllergens, setNewAllergens] = useState('');
   const [newCouponId, setNewCouponId] = useState('');
   const [newWishes, setNewWishes] = useState('');
+  const [orderDraftSavedAt, setOrderDraftSavedAt] = useState<number | null>(null);
+  const orderDraftHydratedRef = React.useRef(false);
+
+  const resetNewOrderForm = () => {
+    setNewTitle('');
+    setNewClientId('');
+    setNewClient('');
+    setNewRecipeId('');
+    setNewWeight(2000);
+    setNewPriceRub('4500');
+    setNewDue(new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10));
+    setNewDeliveryAddress('');
+    setNewAllergens('');
+    setNewCouponId('');
+    setNewWishes('');
+  };
+
+  useEffect(() => {
+    if (!createOpen) {
+      orderDraftHydratedRef.current = false;
+      return;
+    }
+    const saved = readFormDraft<OrderFormDraftData>(orderDraftKey(workspace.id));
+    if (saved?.data) {
+      const d = saved.data;
+      setNewTitle(d.newTitle || '');
+      setNewClientId(d.newClientId || '');
+      setNewClient(d.newClient || '');
+      setNewRecipeId(d.newRecipeId || '');
+      setNewWeight(d.newWeight || 2000);
+      setNewPriceRub(d.newPriceRub || '4500');
+      if (d.newDue) setNewDue(d.newDue);
+      setNewDeliveryAddress(d.newDeliveryAddress || '');
+      setNewAllergens(d.newAllergens || '');
+      setNewCouponId(d.newCouponId || '');
+      setNewWishes(d.newWishes || '');
+      setOrderDraftSavedAt(saved.savedAt);
+    } else {
+      setOrderDraftSavedAt(null);
+    }
+    orderDraftHydratedRef.current = true;
+  }, [createOpen, workspace.id]);
+
+  useEffect(() => {
+    if (!createOpen || !orderDraftHydratedRef.current) return;
+    const hasContent = Boolean(
+      newTitle.trim() ||
+        newClient.trim() ||
+        newRecipeId ||
+        newDeliveryAddress.trim() ||
+        newAllergens.trim() ||
+        newCouponId ||
+        newWishes.trim(),
+    );
+    if (!hasContent) return;
+    const timer = window.setTimeout(() => {
+      const stored = writeFormDraft<OrderFormDraftData>(orderDraftKey(workspace.id), {
+        newTitle,
+        newClientId,
+        newClient,
+        newRecipeId,
+        newWeight,
+        newPriceRub,
+        newDue,
+        newDeliveryAddress,
+        newAllergens,
+        newCouponId,
+        newWishes,
+      });
+      if (stored) setOrderDraftSavedAt(stored.savedAt);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [
+    createOpen,
+    workspace.id,
+    newTitle,
+    newClientId,
+    newClient,
+    newRecipeId,
+    newWeight,
+    newPriceRub,
+    newDue,
+    newDeliveryAddress,
+    newAllergens,
+    newCouponId,
+    newWishes,
+  ]);
 
   const filtered = useMemo(() => {
     return data.orders.filter((o) => {
@@ -134,7 +243,7 @@ export function OrdersPage({
   const couponEligible = Boolean(
     selectedCoupon &&
       (!selectedCoupon.minOrderCents || basePriceCents >= selectedCoupon.minOrderCents) &&
-      (!selectedCoupon.clientId || !newClientId || selectedCoupon.clientId === newClientId),
+      (!selectedCoupon.clientId || selectedCoupon.clientId === newClientId),
   );
   const discountCents = useMemo(() => {
     if (!selectedCoupon || !couponEligible || basePriceCents <= 0) return 0;
@@ -292,16 +401,9 @@ export function OrdersPage({
       });
     }
 
-    setNewTitle('');
-    setNewClientId('');
-    setNewClient('');
-    setNewRecipeId('');
-    setNewWeight(2000);
-    setNewPriceRub('4500');
-    setNewDeliveryAddress('');
-    setNewAllergens('');
-    setNewCouponId('');
-    setNewWishes('');
+    clearFormDraft(orderDraftKey(workspace.id));
+    setOrderDraftSavedAt(null);
+    resetNewOrderForm();
     setCreateOpen(false);
     onToast(`Заказ ${orderNumber} создан`);
   };
@@ -646,7 +748,7 @@ export function OrdersPage({
                     className="w-full min-h-[40px] px-3 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm"
                   />
                 </label>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <label className="block space-y-1 text-xs font-medium">
                     <span>Клиент</span>
                     <input
@@ -973,6 +1075,44 @@ export function OrdersPage({
               </button>
               <button
                 type="button"
+                onClick={async () => {
+                  try {
+                    const file = await exportOrderPdf({
+                      order: activeOrder,
+                      workspace,
+                      kind: 'invoice',
+                    });
+                    onToast(`Скачан PDF: ${file}`);
+                  } catch (err) {
+                    onToast(err instanceof Error ? err.message : 'Ошибка экспорта PDF');
+                  }
+                }}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl border border-[var(--line)] text-xs font-medium inline-flex items-center gap-1.5 hover:bg-[var(--soft)]"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>PDF Счёт</span>
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const file = await exportOrderPdf({
+                      order: activeOrder,
+                      workspace,
+                      kind: 'act',
+                    });
+                    onToast(`Скачан PDF: ${file}`);
+                  } catch (err) {
+                    onToast(err instanceof Error ? err.message : 'Ошибка экспорта PDF');
+                  }
+                }}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl border border-[var(--line)] text-xs font-medium inline-flex items-center gap-1.5 hover:bg-[var(--soft)]"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>PDF Акт</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => handleRepeatOrder(activeOrder)}
                 className="min-h-[40px] px-3.5 py-2 rounded-xl border border-[var(--line)] text-xs font-medium inline-flex items-center gap-1.5 hover:bg-[var(--soft)]"
               >
@@ -1006,6 +1146,25 @@ export function OrdersPage({
         onClose={() => setCreateOpen(false)}
       >
         <form onSubmit={handleCreateOrder} className="space-y-4">
+          {orderDraftSavedAt && (
+            <div className="px-3.5 py-2 rounded-xl border border-[var(--line)] bg-[var(--soft)] flex items-center justify-between gap-2 text-xs">
+              <span className="text-[var(--muted)]">
+                Черновик автосохранён в {formatDraftTimeRu(orderDraftSavedAt)}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  clearFormDraft(orderDraftKey(workspace.id));
+                  resetNewOrderForm();
+                  setOrderDraftSavedAt(null);
+                  onToast('Черновик заказа очищен');
+                }}
+                className="font-medium text-[var(--ink)] hover:underline whitespace-nowrap"
+              >
+                Очистить
+              </button>
+            </div>
+          )}
           <label className="block space-y-1 text-sm font-medium">
             <span>Название или состав заказа</span>
             <input
@@ -1067,7 +1226,7 @@ export function OrdersPage({
             </select>
           </label>
 
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <label className="block space-y-1 text-sm font-medium">
               <span>Вес, г</span>
               <input
@@ -1127,7 +1286,7 @@ export function OrdersPage({
             )}
           </label>
 
-          <div className="grid grid-cols-3 gap-2 p-3 rounded-xl bg-[var(--soft)] text-xs tabular-nums">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 p-3 rounded-xl bg-[var(--soft)] text-xs tabular-nums">
             <div>
               <div className="text-[var(--muted)]">Скидка</div>
               <div className="font-semibold">

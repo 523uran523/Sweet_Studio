@@ -1,5 +1,17 @@
-import React, { useMemo, useState } from 'react';
-import { Download, RotateCcw, Trash2, Upload } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  EmailAuthProvider,
+  linkWithCredential,
+  linkWithPopup,
+  linkWithRedirect,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  User,
+  verifyBeforeUpdateEmail,
+} from 'firebase/auth';
+import { CreditCard, Download, KeyRound, Mail, RotateCcw, ShieldCheck, Smartphone, Trash2, Upload, UserPlus } from 'lucide-react';
+import { translateFirebaseAuthError } from '../components/AuthOnboarding';
+import { PWAInstallButton, useOnlineStatus, usePWAInstall } from '../components/PwaControls';
 import {
   Card,
   Drawer,
@@ -9,12 +21,23 @@ import {
 import { netCashTotals } from '../core/calculatorCore';
 import { centsToRubInput, formatMoneyCents, parseRubToCents } from '../core/moneyFormat';
 import { computeWorkspacePayrollPreview } from '../core/payrollEngine';
+import { resolveSubscriptionState, SUBSCRIPTION_PRICE_CENTS } from '../core/subscription';
+import {
+  collection,
+  onSnapshot,
+  query,
+  where,
+} from 'firebase/firestore';
+import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase/client';
 import {
   addFinancialTransaction,
   createWorkspaceEntity,
+  createWorkspaceInvitation,
   deleteWorkspaceEntity,
   newId,
+  recordSubscriptionPayment,
   reverseFinancialTransaction,
+  revokeWorkspaceInvitation,
   transferBetweenAccounts,
   updateWorkspaceEntity,
   updateWorkspacePrefs,
@@ -31,6 +54,7 @@ import {
   UiDensity,
   UserRole,
   Workspace,
+  WorkspaceInvitation,
   WorkspaceMember,
 } from '../types/domain';
 import { NAV_ITEMS } from '../components/AppShell';
@@ -718,11 +742,19 @@ export function TeamPage({
   workspace,
   data,
   hideAmounts,
+  userName = 'Владелец',
+  isOwner = true,
+  canManageTeam = true,
+  canManagePayroll = true,
   onToast,
 }: {
   workspace: Workspace;
   data: WorkspaceSnapshot;
   hideAmounts: boolean;
+  userName?: string;
+  isOwner?: boolean;
+  canManageTeam?: boolean;
+  canManagePayroll?: boolean;
   onToast: (msg: string) => void;
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -730,6 +762,15 @@ export function TeamPage({
   const [payoutPeriod, setPayoutPeriod] = useState<PayrollPeriod | null>(null);
   const [payoutAccountId, setPayoutAccountId] = useState(data.accounts[0]?.id || '');
   const [payoutRub, setPayoutRub] = useState('');
+
+  const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
+  const [inviteDrawerOpen, setInviteDrawerOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<Exclude<UserRole, 'owner'>>('confectioner');
+  const [invitePayType, setInvitePayType] = useState<PayType>('hourly');
+  const [inviteRateRub, setInviteRateRub] = useState('550');
+  const [invitePercent, setInvitePercent] = useState(15);
+  const [inviting, setInviting] = useState(false);
 
   const [name, setName] = useState('');
   const [role, setRole] = useState<UserRole>('confectioner');
@@ -740,6 +781,60 @@ export function TeamPage({
 
   const monthStart = new Date().toISOString().slice(0, 7) + '-01';
   const today = new Date().toISOString().slice(0, 10);
+
+  useEffect(() => {
+    if (!isOwner || !canManageTeam) {
+      setInvitations([]);
+      return;
+    }
+    const q = query(
+      collection(db, 'invitations'),
+      where('workspaceId', '==', workspace.id),
+      where('ownerId', '==', workspace.ownerId),
+    );
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<WorkspaceInvitation, 'id'>),
+          }))
+          .sort(
+            (a, b) =>
+              (b.status === 'pending' ? 1 : 0) - (a.status === 'pending' ? 1 : 0),
+          );
+        setInvitations(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'invitations'),
+    );
+    return unsub;
+  }, [workspace.id, workspace.ownerId, isOwner, canManageTeam]);
+
+  const handleSendInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanEmail = inviteEmail.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@') || inviting) return;
+    setInviting(true);
+    try {
+      await createWorkspaceInvitation({
+        workspace,
+        email: cleanEmail,
+        invitedByName: userName,
+        role: inviteRole,
+        payType: invitePayType,
+        rateCents: parseRubToCents(inviteRateRub),
+        percent: invitePercent,
+      });
+      setInviteEmail('');
+      setInviteDrawerOpen(false);
+      onToast(`Приглашение отправлено для ${cleanEmail}`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Не удалось создать приглашение');
+    } finally {
+      setInviting(false);
+    }
+  };
 
   const previewLines = useMemo(
     () =>
@@ -858,29 +953,52 @@ export function TeamPage({
         title="Команда и зарплата"
         subtitle="Роли, ставки, выплата по ведомостям и движок расчёта начислений"
         action={
-          <>
-            <button
-              type="button"
-              onClick={handleClosePeriod}
-              className="min-h-[44px] px-4 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium hover:bg-[var(--soft)] whitespace-nowrap shrink-0"
-            >
-              Закрыть период
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setName('');
-                setRole('confectioner');
-                setPayType('hourly');
-                setRateRub('550');
-                setPercent(15);
-                setDrawerOpen(true);
-              }}
-              className="min-h-[44px] px-4 py-2 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium whitespace-nowrap shrink-0"
-            >
-              + Сотрудник
-            </button>
-          </>
+          (canManagePayroll || canManageTeam) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {canManagePayroll && (
+                <button
+                  type="button"
+                  onClick={handleClosePeriod}
+                  className="min-h-[44px] px-4 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium hover:bg-[var(--soft)] whitespace-nowrap shrink-0"
+                >
+                  Закрыть период
+                </button>
+              )}
+              {isOwner && canManageTeam && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInviteEmail('');
+                    setInviteRole('confectioner');
+                    setInvitePayType('hourly');
+                    setInviteRateRub('550');
+                    setInvitePercent(15);
+                    setInviteDrawerOpen(true);
+                  }}
+                  className="min-h-[44px] px-4 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium hover:bg-[var(--soft)] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span>Пригласить по email</span>
+                </button>
+              )}
+              {canManageTeam && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setName('');
+                    setRole('confectioner');
+                    setPayType('hourly');
+                    setRateRub('550');
+                    setPercent(15);
+                    setDrawerOpen(true);
+                  }}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium whitespace-nowrap shrink-0"
+                >
+                  + Сотрудник
+                </button>
+              )}
+            </div>
+          )
         }
       />
 
@@ -894,8 +1012,11 @@ export function TeamPage({
               <button
                 key={m.id}
                 type="button"
-                onClick={() => openEditMember(m)}
-                className="w-full text-left py-3 px-2 -mx-2 rounded-lg hover:bg-[var(--soft)]/50 flex items-center justify-between gap-3 transition-colors"
+                disabled={!canManageTeam}
+                onClick={() => canManageTeam && openEditMember(m)}
+                className={`w-full text-left py-3 px-2 -mx-2 rounded-lg flex items-center justify-between gap-3 transition-colors ${
+                  canManageTeam ? 'hover:bg-[var(--soft)]/50' : 'cursor-default'
+                }`}
               >
                 <div>
                   <div className="text-sm font-semibold">
@@ -908,6 +1029,7 @@ export function TeamPage({
                   </div>
                   <div className="text-xs text-[var(--muted)]">
                     {ROLE_RU[m.role] || m.role} · {PAY_RU[m.payType] || m.payType}
+                    {m.email ? ` · ${m.email}` : ''}
                   </div>
                 </div>
                 <div className="text-sm tabular-nums text-right">
@@ -946,7 +1068,50 @@ export function TeamPage({
         </Card>
       </div>
 
-      {data.payrollPeriods.length > 0 && (
+      {isOwner && canManageTeam && invitations.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between pb-3 border-b border-[var(--line)]">
+            <h3 className="text-base font-semibold inline-flex items-center gap-2">
+              <Mail className="w-4 h-4 text-[var(--muted)]" />
+              <span>Приглашения по email ({invitations.length})</span>
+            </h3>
+          </div>
+          <div className="divide-y divide-[var(--line)] mt-2 text-sm">
+            {invitations.map((inv) => (
+              <div
+                key={inv.id}
+                className="py-3 flex flex-wrap items-center justify-between gap-3"
+              >
+                <div>
+                  <div className="font-medium">{inv.email}</div>
+                  <div className="text-xs text-[var(--muted)]">
+                    Роль: {ROLE_RU[inv.role] || inv.role} · Статус:{' '}
+                    {inv.status === 'pending'
+                      ? 'Ожидает входа сотрудника'
+                      : inv.status === 'accepted'
+                        ? 'Принято'
+                        : 'Отозвано'}
+                  </div>
+                </div>
+                {inv.status === 'pending' && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await revokeWorkspaceInvitation(inv.id);
+                      onToast(`Приглашение для ${inv.email} отозвано`);
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)] text-xs font-medium"
+                  >
+                    Отозвать
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {canManagePayroll && data.payrollPeriods.length > 0 && (
         <Card>
           <h3 className="text-base font-semibold pb-3 border-b border-[var(--line)]">
             Ведомости ({data.payrollPeriods.length})
@@ -1231,6 +1396,89 @@ export function TeamPage({
           </button>
         </form>
       </Drawer>
+
+      <Drawer
+        open={inviteDrawerOpen}
+        title="Пригласить сотрудника по email"
+        subtitle="Сотрудник увидит приглашение сразу после входа (по email/паролю или через Google) под указанной почтой"
+        onClose={() => setInviteDrawerOpen(false)}
+      >
+        <form onSubmit={handleSendInvite} className="space-y-4">
+          <label className="block space-y-1 text-sm font-medium">
+            <span>Email сотрудника</span>
+            <input
+              type="email"
+              required
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              placeholder="colleague@example.com"
+              className="w-full min-h-[44px] px-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+            />
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Роль</span>
+              <select
+                value={inviteRole}
+                onChange={(e) =>
+                  setInviteRole(e.target.value as Exclude<UserRole, 'owner'>)
+                }
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              >
+                <option value="confectioner">Кондитер</option>
+                <option value="seller">Продавец / Кассир</option>
+                <option value="storekeeper">Кладовщик</option>
+                <option value="marketer">Маркетолог</option>
+                <option value="accountant">Бухгалтер</option>
+                <option value="admin">Администратор</option>
+              </select>
+            </label>
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Тип оплаты</span>
+              <select
+                value={invitePayType}
+                onChange={(e) => setInvitePayType(e.target.value as PayType)}
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              >
+                <option value="hourly">Почасовая</option>
+                <option value="piece">Сдельная (за заказ)</option>
+                <option value="percent">Процент от заказа</option>
+                <option value="salary">Оклад</option>
+                <option value="mixed">Смешанная</option>
+              </select>
+            </label>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Ставка, ₽</span>
+              <input
+                type="text"
+                value={inviteRateRub}
+                onChange={(e) => setInviteRateRub(e.target.value)}
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] tabular-nums"
+              />
+            </label>
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Процент, %</span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={invitePercent}
+                onChange={(e) => setInvitePercent(Number(e.target.value) || 0)}
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] tabular-nums"
+              />
+            </label>
+          </div>
+          <button
+            type="submit"
+            disabled={inviting}
+            className="w-full min-h-[46px] rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium disabled:opacity-60"
+          >
+            {inviting ? 'Отправляем...' : 'Создать приглашение'}
+          </button>
+        </form>
+      </Drawer>
     </div>
   );
 }
@@ -1239,6 +1487,9 @@ export function SettingsPage({
   workspace,
   allWorkspaces = [],
   data,
+  currentUser,
+  onUserUpdated,
+  canManageBilling = true,
   onSwitchWorkspace,
   onCreateWorkspace,
   onToast,
@@ -1246,12 +1497,24 @@ export function SettingsPage({
   workspace: Workspace;
   allWorkspaces?: Workspace[];
   data: WorkspaceSnapshot;
+  currentUser?: User | null;
+  onUserUpdated?: () => void;
+  canManageBilling?: boolean;
   onSwitchWorkspace?: (workspaceId: string) => void;
   onCreateWorkspace?: () => void;
   onToast: (msg: string) => void;
 }) {
   const hiddenSet = new Set(workspace.hiddenModules || []);
   const pins = workspace.pins || ['work', 'orders', 'recipes'];
+  const subState = useMemo(() => resolveSubscriptionState(workspace), [workspace]);
+  const [payingSub, setPayingSub] = useState(false);
+  const isOnline = useOnlineStatus();
+  const { isInstalled } = usePWAInstall();
+
+  const [linkEmailInput, setLinkEmailInput] = useState(currentUser?.email || '');
+  const [linkPassInput, setLinkPassInput] = useState('');
+  const [newEmailInput, setNewEmailInput] = useState('');
+  const [authSaving, setAuthSaving] = useState(false);
 
   const [studioName, setStudioName] = useState(workspace.name);
   const [studioSlogan, setStudioSlogan] = useState(workspace.slogan || '');
@@ -1736,6 +1999,318 @@ export function SettingsPage({
             })}
           </div>
         </Card>
+
+        <Card className="lg:col-span-2 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold inline-flex items-center gap-2">
+                <CreditCard className="w-4 h-4 text-[var(--muted)]" />
+                <span>Подписка SweetStudio</span>
+              </h2>
+              <p className="text-xs text-[var(--muted)] mt-0.5">
+                Тариф Cloud PRO: {formatMoneyCents(SUBSCRIPTION_PRICE_CENTS)} / мес · 14 дней триал, 7 дней льготный период
+              </p>
+            </div>
+            {canManageBilling && (
+              <button
+                type="button"
+                disabled={payingSub}
+                onClick={async () => {
+                  setPayingSub(true);
+                  try {
+                    const res = await recordSubscriptionPayment({ workspace, months: 1 });
+                    onToast(`Подписка продлена до ${res.currentPeriodEnd}`);
+                  } catch (err) {
+                    onToast(err instanceof Error ? err.message : 'Ошибка продления подписки');
+                  } finally {
+                    setPayingSub(false);
+                  }
+                }}
+                className="min-h-[42px] px-4 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium disabled:opacity-60 whitespace-nowrap"
+              >
+                {payingSub
+                  ? 'Проводим...'
+                  : `Продлить на 1 мес (${formatMoneyCents(SUBSCRIPTION_PRICE_CENTS)})`}
+              </button>
+            )}
+          </div>
+
+          <div className="grid sm:grid-cols-4 gap-3 text-sm">
+            <div className="p-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]">
+              <div className="text-xs text-[var(--muted)]">Статус</div>
+              <div className="font-semibold mt-0.5">
+                {subState.effectiveStatus === 'active'
+                  ? 'Активна (PRO)'
+                  : subState.effectiveStatus === 'trialing'
+                    ? 'Триал (14 дней)'
+                    : subState.effectiveStatus === 'grace'
+                      ? 'Льготный период'
+                      : 'Истекла'}
+              </div>
+            </div>
+            <div className="p-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]">
+              <div className="text-xs text-[var(--muted)]">Осталось дней</div>
+              <div className="font-semibold tabular-nums mt-0.5">{subState.daysLeft}</div>
+            </div>
+            <div className="p-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]">
+              <div className="text-xs text-[var(--muted)]">Оплачено до</div>
+              <div className="font-semibold tabular-nums mt-0.5">
+                {subState.expiresAt || '—'}
+              </div>
+            </div>
+            <div className="p-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]">
+              <div className="text-xs text-[var(--muted)]">Права доступа</div>
+              <div className="font-semibold mt-0.5">
+                Запись: {subState.canWrite ? 'Да' : 'Нет'} · Экспорт: {subState.canExport ? 'Да' : 'Нет'}
+              </div>
+            </div>
+          </div>
+
+          {data.billingEvents.length > 0 && (
+            <div className="pt-3 border-t border-[var(--line)] space-y-1.5">
+              <div className="text-xs font-semibold text-[var(--muted)]">История оплат подписки</div>
+              <div className="divide-y divide-[var(--line)] text-xs">
+                {data.billingEvents.slice(0, 5).map((ev) => (
+                  <div key={ev.id} className="py-2 flex items-center justify-between gap-2 tabular-nums">
+                    <span>
+                      {ev.occurredAt} · PRO ({ev.periodMonths} мес.) · {ev.provider}
+                    </span>
+                    <span className="font-semibold">{formatMoneyCents(ev.amountCents)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+
+        {currentUser && (() => {
+          const hasPassword = currentUser.providerData.some((p) => p.providerId === 'password');
+          const hasGoogle = currentUser.providerData.some((p) => p.providerId === 'google.com');
+          return (
+            <Card className="lg:col-span-2 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold inline-flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-[var(--muted)]" />
+                    <span>Аккаунт, пароль и привязка к почте</span>
+                  </h2>
+                  <p className="text-xs text-[var(--muted)] mt-0.5">
+                    Текущая почта: <span className="font-medium text-[var(--ink)]">{currentUser.email || 'не указана'}</span> ·{' '}
+                    {currentUser.emailVerified ? 'подтверждена' : 'ожидает подтверждения'} · способы входа:{' '}
+                    {[hasPassword && 'Email и пароль', hasGoogle && 'Google'].filter(Boolean).join(', ') || 'не привязаны'}
+                  </p>
+                </div>
+                {!currentUser.emailVerified && (
+                  <button
+                    type="button"
+                    disabled={authSaving}
+                    onClick={async () => {
+                      setAuthSaving(true);
+                      try {
+                        await sendEmailVerification(currentUser);
+                        onToast('Письмо подтверждения отправлено');
+                      } catch (err) {
+                        onToast(translateFirebaseAuthError(err));
+                      } finally {
+                        setAuthSaving(false);
+                      }
+                    }}
+                    className="min-h-[38px] px-3.5 rounded-xl border border-[var(--line)] hover:bg-[var(--soft)] text-xs font-medium"
+                  >
+                    Подтвердить почту
+                  </button>
+                )}
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4 pt-2 border-t border-[var(--line)]">
+                {!hasPassword ? (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      const cleanEmail = (linkEmailInput || currentUser.email || '').trim();
+                      if (!cleanEmail || linkPassInput.length < 6) {
+                        onToast('Укажите email и пароль минимум из 6 символов');
+                        return;
+                      }
+                      setAuthSaving(true);
+                      try {
+                        const cred = EmailAuthProvider.credential(cleanEmail, linkPassInput);
+                        await linkWithCredential(currentUser, cred);
+                        await currentUser.reload();
+                        setLinkPassInput('');
+                        onUserUpdated?.();
+                        onToast('Вход по почте и паролю привязан к аккаунту');
+                      } catch (err) {
+                        onToast(translateFirebaseAuthError(err));
+                      } finally {
+                        setAuthSaving(false);
+                      }
+                    }}
+                    className="space-y-2.5 p-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+                  >
+                    <div className="text-xs font-semibold">Привязать вход по логину и паролю</div>
+                    <p className="text-[11px] text-[var(--muted)]">
+                      Сможете входить по почте и паролю на любом устройстве даже без Google.
+                    </p>
+                    <input
+                      type="email"
+                      required
+                      value={linkEmailInput}
+                      onChange={(e) => setLinkEmailInput(e.target.value)}
+                      placeholder="Email для входа"
+                      className="w-full min-h-[38px] px-3 rounded-lg border border-[var(--line)] bg-[var(--card)] text-xs"
+                    />
+                    <input
+                      type="password"
+                      required
+                      minLength={6}
+                      value={linkPassInput}
+                      onChange={(e) => setLinkPassInput(e.target.value)}
+                      placeholder="Придумайте пароль (мин. 6 символов)"
+                      className="w-full min-h-[38px] px-3 rounded-lg border border-[var(--line)] bg-[var(--card)] text-xs"
+                    />
+                    <button
+                      type="submit"
+                      disabled={authSaving}
+                      className="min-h-[38px] px-3.5 rounded-lg bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium inline-flex items-center gap-1.5 disabled:opacity-60"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>Привязать пароль</span>
+                    </button>
+                  </form>
+                ) : (
+                  <div className="space-y-2.5 p-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] flex flex-col justify-between">
+                    <div>
+                      <div className="text-xs font-semibold">Вход по паролю активен</div>
+                      <p className="text-[11px] text-[var(--muted)] mt-1">
+                        Для смены пароля отправьте письмо со ссылкой восстановления на {currentUser.email}.
+                      </p>
+                    </div>
+                    <div>
+                      <button
+                        type="button"
+                        disabled={authSaving || !currentUser.email}
+                        onClick={async () => {
+                          if (!currentUser.email) return;
+                          setAuthSaving(true);
+                          try {
+                            await sendPasswordResetEmail(auth, currentUser.email);
+                            onToast(`Ссылка для смены пароля отправлена на ${currentUser.email}`);
+                          } catch (err) {
+                            onToast(translateFirebaseAuthError(err));
+                          } finally {
+                            setAuthSaving(false);
+                          }
+                        }}
+                        className="min-h-[38px] px-3.5 rounded-lg border border-[var(--line)] bg-[var(--card)] hover:bg-[var(--soft)] text-xs font-medium inline-flex items-center gap-1.5 disabled:opacity-60"
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                        <span>Сменить пароль по почте</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-3 p-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]">
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      const nextEmail = newEmailInput.trim();
+                      if (!nextEmail) return;
+                      setAuthSaving(true);
+                      try {
+                        await verifyBeforeUpdateEmail(currentUser, nextEmail);
+                        setNewEmailInput('');
+                        onToast(`Ссылка подтверждения отправлена на ${nextEmail}. Перейдите по ней для смены почты.`);
+                      } catch (err) {
+                        onToast(translateFirebaseAuthError(err));
+                      } finally {
+                        setAuthSaving(false);
+                      }
+                    }}
+                    className="space-y-2"
+                  >
+                    <div className="text-xs font-semibold">Сменить / привязать другую почту</div>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="email"
+                        required
+                        value={newEmailInput}
+                        onChange={(e) => setNewEmailInput(e.target.value)}
+                        placeholder="new-email@example.com"
+                        className="flex-1 min-h-[38px] px-3 rounded-lg border border-[var(--line)] bg-[var(--card)] text-xs"
+                      />
+                      <button
+                        type="submit"
+                        disabled={authSaving}
+                        className="min-h-[38px] px-3.5 rounded-lg border border-[var(--line)] bg-[var(--card)] hover:bg-[var(--soft)] text-xs font-medium inline-flex items-center justify-center gap-1.5 shrink-0 disabled:opacity-60"
+                      >
+                        <Mail className="w-3.5 h-3.5" />
+                        <span>Привязать email</span>
+                      </button>
+                    </div>
+                  </form>
+
+                  {!hasGoogle && (
+                    <div className="pt-2 border-t border-[var(--line)] flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] text-[var(--muted)]">
+                        Дополнительно можно привязать вход в 1 клик через Google
+                      </span>
+                      <button
+                        type="button"
+                        disabled={authSaving}
+                        onClick={async () => {
+                          setAuthSaving(true);
+                          try {
+                            await linkWithPopup(currentUser, googleProvider);
+                            await currentUser.reload();
+                            onUserUpdated?.();
+                            onToast('Аккаунт Google привязан');
+                          } catch (err) {
+                            const code =
+                              typeof err === 'object' && err !== null && 'code' in err
+                                ? String((err as { code?: unknown }).code || '')
+                                : '';
+                            if (code === 'auth/popup-blocked') {
+                              try {
+                                await linkWithRedirect(currentUser, googleProvider);
+                                return;
+                              } catch (redirErr) {
+                                onToast(translateFirebaseAuthError(redirErr));
+                              }
+                            } else {
+                              onToast(translateFirebaseAuthError(err));
+                            }
+                          } finally {
+                            setAuthSaving(false);
+                          }
+                        }}
+                        className="min-h-[36px] px-3 rounded-lg border border-[var(--line)] bg-[var(--card)] hover:bg-[var(--soft)] text-xs font-medium"
+                      >
+                        Привязать Google
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
+          );
+        })()}
+
+        <Card className="lg:col-span-2 flex flex-wrap items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold inline-flex items-center gap-2">
+              <Smartphone className="w-4 h-4 text-[var(--muted)]" />
+              <span>Приложение (PWA) и черновики форм</span>
+            </h2>
+            <p className="text-xs text-[var(--muted)]">
+              Статус сети: <span className="font-medium text-[var(--ink)]">{isOnline ? 'онлайн' : 'оффлайн (кэш PWA)'}</span> ·{' '}
+              Режим: <span className="font-medium text-[var(--ink)]">{isInstalled ? 'установлено как приложение' : 'браузер'}</span> ·{' '}
+              Недописанные заказы и рецепты автосохраняются локально.
+            </p>
+          </div>
+          <PWAInstallButton />
+        </Card>
       </div>
 
       <Drawer
@@ -1861,7 +2436,7 @@ export function AcademyPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Академия Sweet Studio"
+        title="Академия SweetStudio"
         subtitle={`Пройдено уроков: ${doneIds.length} из ${ACADEMY_LESSONS.length}`}
       />
       <div className="grid md:grid-cols-2 gap-4">

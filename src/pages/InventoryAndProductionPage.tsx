@@ -1,5 +1,14 @@
-import React, { useMemo, useState } from 'react';
-import { History, Pencil, RefreshCw, Scale, Trash2 } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  ArrowRightLeft,
+  Check,
+  History,
+  Pencil,
+  RefreshCw,
+  Scale,
+  Trash2,
+  X,
+} from 'lucide-react';
 import {
   Card,
   Drawer,
@@ -12,14 +21,22 @@ import {
   effectiveQuantity,
   resourceLineTotalCents,
 } from '../core/calculatorCore';
+import {
+  matchesLocationFilter,
+  resolveDefaultLocation,
+  resolveLocationName,
+} from '../core/locations';
 import { centsToRubInput, formatMoneyCents, parseRubToCents } from '../core/moneyFormat';
 import { convertQtyWithDensity, formatQty, QTY_UNITS } from '../core/units';
 import {
+  cancelStockTransfer,
   consumeInventoryFefo,
+  createStockTransfer,
   createWorkspaceEntity,
   newId,
   paySupplierDebt,
   receivePurchaseOrder,
+  receiveStockTransfer,
   updateWorkspaceEntity,
   upsertInventoryReceipt,
   WorkspaceSnapshot,
@@ -32,6 +49,7 @@ import {
   Recipe,
   RecipeIngredientLine,
   StockLot,
+  StockTransfer,
   Supplier,
   Workspace,
 } from '../types/domain';
@@ -70,16 +88,22 @@ function formatMovementDate(raw: unknown): string {
 export function InventoryPage({
   workspace,
   data,
+  activeLocationId = '',
   hideAmounts,
   onToast,
 }: {
   workspace: Workspace;
   data: WorkspaceSnapshot;
+  activeLocationId?: string;
   hideAmounts: boolean;
   onToast: (msg: string) => void;
 }) {
   const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
-  const [tab, setTab] = useState<'items' | 'lots' | 'movements' | 'purchases'>('items');
+  const defaultLocation = useMemo(
+    () => resolveDefaultLocation(data.locations),
+    [data.locations],
+  );
+  const [tab, setTab] = useState<'items' | 'lots' | 'transfers' | 'movements' | 'purchases'>('items');
   const [itemDrawer, setItemDrawer] = useState(false);
   const [consumeTarget, setConsumeTarget] = useState<InventoryItem | null>(null);
   const [consumeQty, setConsumeQty] = useState('0.5');
@@ -116,9 +140,28 @@ export function InventoryPage({
   const [newQty, setNewQty] = useState('1');
   const [newCostRub, setNewCostRub] = useState('800');
   const [newDensity, setNewDensity] = useState('');
+  const [newLocationId, setNewLocationId] = useState(
+    activeLocationId || defaultLocation?.id || '',
+  );
   const [newExpires, setNewExpires] = useState(
     new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
   );
+
+  useEffect(() => {
+    setNewLocationId(activeLocationId || defaultLocation?.id || '');
+  }, [activeLocationId, defaultLocation?.id]);
+
+  // StockTransfer state
+  const [transferDrawerOpen, setTransferDrawerOpen] = useState(false);
+  const [transferFilter, setTransferFilter] = useState<'all' | 'in_transit' | 'done'>('all');
+  const [transferItemId, setTransferItemId] = useState('');
+  const [transferLotId, setTransferLotId] = useState('');
+  const [transferFromLocationId, setTransferFromLocationId] = useState('');
+  const [transferToLocationId, setTransferToLocationId] = useState('');
+  const [transferQty, setTransferQty] = useState('1');
+  const [transferNote, setTransferNote] = useState('');
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferActionId, setTransferActionId] = useState<string | null>(null);
 
   const [supplierDrawer, setSupplierDrawer] = useState(false);
   const [supName, setSupName] = useState('');
@@ -370,6 +413,180 @@ export function InventoryPage({
     [data.stockLots],
   );
 
+  const visibleItems = useMemo(
+    () =>
+      data.inventoryItems.filter((item) =>
+        matchesLocationFilter({
+          entityLocationId: item.locationId,
+          activeLocationId,
+          locations: data.locations,
+        }),
+      ),
+    [data.inventoryItems, activeLocationId, data.locations],
+  );
+
+  const visibleLots = useMemo(
+    () =>
+      sortedLots.filter((lot) =>
+        matchesLocationFilter({
+          entityLocationId: lot.locationId,
+          activeLocationId,
+          locations: data.locations,
+        }),
+      ),
+    [sortedLots, activeLocationId, data.locations],
+  );
+
+  const visibleTransfers = useMemo(
+    () =>
+      [...data.stockTransfers]
+        .sort((a, b) => b.sentAt.localeCompare(a.sentAt))
+        .filter(
+          (t) =>
+            !activeLocationId ||
+            t.fromLocationId === activeLocationId ||
+            t.toLocationId === activeLocationId,
+        ),
+    [data.stockTransfers, activeLocationId],
+  );
+
+  const displayedTransfers = useMemo(() => {
+    if (transferFilter === 'in_transit') {
+      return visibleTransfers.filter((t) => t.status === 'in_transit');
+    }
+    if (transferFilter === 'done') {
+      return visibleTransfers.filter((t) => t.status !== 'in_transit');
+    }
+    return visibleTransfers;
+  }, [visibleTransfers, transferFilter]);
+
+  const inTransitCount = useMemo(
+    () => visibleTransfers.filter((t) => t.status === 'in_transit').length,
+    [visibleTransfers],
+  );
+
+  const eligibleTransferItems = useMemo(
+    () => data.inventoryItems.filter((i) => i.qtyOnHand > 0),
+    [data.inventoryItems],
+  );
+
+  const selectedTransferItem = useMemo(
+    () => eligibleTransferItems.find((i) => i.id === transferItemId) || null,
+    [eligibleTransferItems, transferItemId],
+  );
+
+  const eligibleTransferLots = useMemo(
+    () =>
+      data.stockLots.filter(
+        (l) => l.itemId === transferItemId && l.status === 'active' && l.remainingQty > 0,
+      ),
+    [data.stockLots, transferItemId],
+  );
+
+  const openTransferDrawer = (preselected?: InventoryItem) => {
+    const targetItem =
+      preselected ||
+      visibleItems.find((i) => i.qtyOnHand > 0) ||
+      eligibleTransferItems[0] ||
+      null;
+    const fromLocId =
+      targetItem?.locationId ||
+      activeLocationId ||
+      defaultLocation?.id ||
+      data.locations[0]?.id ||
+      '';
+    const toLocId = data.locations.find((l) => l.id !== fromLocId)?.id || '';
+    setTransferItemId(targetItem?.id || '');
+    setTransferLotId('');
+    setTransferFromLocationId(fromLocId);
+    setTransferToLocationId(toLocId);
+    setTransferQty(targetItem ? String(Math.min(1, targetItem.qtyOnHand) || 1) : '1');
+    setTransferNote('');
+    setTransferDrawerOpen(true);
+  };
+
+  const handleCreateTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (transferBusy) return;
+    const item = data.inventoryItems.find((i) => i.id === transferItemId);
+    const fromLoc = data.locations.find((l) => l.id === transferFromLocationId);
+    const toLoc = data.locations.find((l) => l.id === transferToLocationId);
+    if (!item) {
+      onToast('Выберите позицию для перемещения');
+      return;
+    }
+    if (!fromLoc || !toLoc) {
+      onToast('Выберите точку отправления и точку назначения');
+      return;
+    }
+    if (fromLoc.id === toLoc.id) {
+      onToast('Точка отправления и точка назначения должны отличаться');
+      return;
+    }
+    const qtyVal = Number(transferQty.replace(',', '.')) || 0;
+    if (qtyVal <= 0) {
+      onToast('Укажите положительное количество');
+      return;
+    }
+    const lot = transferLotId
+      ? data.stockLots.find((l) => l.id === transferLotId)
+      : undefined;
+
+    setTransferBusy(true);
+    try {
+      await createStockTransfer({
+        workspace,
+        sourceItem: item,
+        sourceLot: lot,
+        fromLocation: fromLoc,
+        toLocation: toLoc,
+        qty: qtyVal,
+        note: transferNote,
+      });
+      setTransferDrawerOpen(false);
+      setTab('transfers');
+      onToast(`Отправлено: ${item.name} (${fromLoc.name} → ${toLoc.name})`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Не удалось создать перемещение');
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
+  const handleReceiveTransfer = async (trf: StockTransfer) => {
+    if (transferActionId) return;
+    setTransferActionId(trf.id);
+    try {
+      await receiveStockTransfer({
+        workspace,
+        transfer: trf,
+        inventoryItems: data.inventoryItems,
+        stockLots: data.stockLots,
+      });
+      onToast(`Принято на «${trf.toLocationName}»: ${trf.itemName}`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Ошибка приёмки перемещения');
+    } finally {
+      setTransferActionId(null);
+    }
+  };
+
+  const handleCancelTransfer = async (trf: StockTransfer) => {
+    if (transferActionId) return;
+    setTransferActionId(trf.id);
+    try {
+      await cancelStockTransfer({
+        workspace,
+        transfer: trf,
+      });
+      onToast(`Перемещение отменено, остаток возвращён на «${trf.fromLocationName}»`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Ошибка отмены перемещения');
+    } finally {
+      setTransferActionId(null);
+    }
+  };
+
   const historyMovements = useMemo(() => {
     if (!historyItem) return [];
     return data.stockMovements.filter(
@@ -384,6 +601,7 @@ export function InventoryPage({
     const qty = Math.max(0, Number(newQty.replace(',', '.')) || 0);
     const unitCostCents = parseRubToCents(newCostRub);
     const dens = Number(newDensity.replace(',', '.'));
+    const targetLocId = newLocationId || activeLocationId || defaultLocation?.id || '';
 
     const payload: Record<string, unknown> = {
       name: newName.trim().slice(0, 140),
@@ -402,11 +620,12 @@ export function InventoryPage({
       avgCostCents: unitCostCents,
     };
     if (Number.isFinite(dens) && dens > 0) payload.density = dens;
+    if (targetLocId) payload.locationId = targetLocId;
 
     await createWorkspaceEntity(workspace, 'inventoryItems', itemId, payload);
     if (qty > 0) {
       const lotId = newId('lot');
-      await createWorkspaceEntity(workspace, 'stockLots', lotId, {
+      const lotPayload: Record<string, unknown> = {
         itemId,
         itemName: newName.trim().slice(0, 140),
         lotCode: `П-${Date.now().toString().slice(-4)}`,
@@ -416,7 +635,9 @@ export function InventoryPage({
         unitCostCents,
         expiresAt: newExpires,
         status: 'active',
-      });
+      };
+      if (targetLocId) lotPayload.locationId = targetLocId;
+      await createWorkspaceEntity(workspace, 'stockLots', lotId, lotPayload);
       await createWorkspaceEntity(workspace, 'stockMovements', newId('mov'), {
         kind: 'receipt',
         itemId,
@@ -684,7 +905,11 @@ export function InventoryPage({
     <div className="space-y-6">
       <PageHeader
         title="Кладовая и партии FEFO"
-        subtitle="Сырьё, полуфабрикаты, партии со сроками годности, движения и закупки"
+        subtitle={
+          activeLocationId
+            ? `Точка: ${resolveLocationName(data.locations, activeLocationId)} · сырьё, полуфабрикаты, партии и перемещения`
+            : 'Сырьё, полуфабрикаты, партии со сроками годности, перемещения и закупки'
+        }
         action={
           <div className="flex flex-wrap items-center gap-2">
             {recipePriceSyncPreview.length > 0 && (
@@ -699,6 +924,14 @@ export function InventoryPage({
             )}
             <button
               type="button"
+              onClick={() => openTransferDrawer()}
+              className="min-h-[44px] px-3.5 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium hover:bg-[var(--soft)] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <ArrowRightLeft className="w-4 h-4" />
+              <span>Переместить</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setImportDrawer(true)}
               className="min-h-[44px] px-3.5 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium hover:bg-[var(--soft)] whitespace-nowrap shrink-0"
             >
@@ -706,7 +939,10 @@ export function InventoryPage({
             </button>
             <button
               type="button"
-              onClick={() => setItemDrawer(true)}
+              onClick={() => {
+                setNewLocationId(activeLocationId || defaultLocation?.id || '');
+                setItemDrawer(true);
+              }}
               className="min-h-[44px] px-4 py-2 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium whitespace-nowrap shrink-0"
             >
               + Оприходовать
@@ -719,8 +955,9 @@ export function InventoryPage({
         value={tab}
         onChange={setTab}
         options={[
-          { id: 'items', label: 'Остатки', count: data.inventoryItems.length },
-          { id: 'lots', label: 'Партии FEFO', count: sortedLots.length },
+          { id: 'items', label: 'Остатки', count: visibleItems.length },
+          { id: 'lots', label: 'Партии FEFO', count: visibleLots.length },
+          { id: 'transfers', label: 'Перемещения', count: inTransitCount },
           { id: 'movements', label: 'Движения', count: data.stockMovements.length },
           { id: 'purchases', label: 'Закупки', count: data.purchases.length },
         ]}
@@ -740,80 +977,103 @@ export function InventoryPage({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--line)]">
-                {data.inventoryItems.map((item) => {
-                  const low =
-                    item.minQty !== undefined && item.qtyOnHand <= item.minQty;
-                  return (
-                    <tr key={item.id} className="hover:bg-[var(--soft)]/30">
-                      <td className="px-4 py-3.5">
-                        <div className="font-medium">
-                          {item.name}
-                          {item.density ? (
-                            <span className="ml-1.5 text-[11px] font-normal text-[var(--muted)]">
-                              ({item.density} г/мл)
-                            </span>
-                          ) : null}
-                        </div>
-                        {low && (
-                          <div className="text-xs text-[var(--danger)]">
-                            Ниже минимума ({item.minQty} {item.unit})
+                {visibleItems.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-8 text-center text-sm text-[var(--muted)]">
+                      На выбранной точке пока нет остатков. Оприходуйте позицию или примите перемещение.
+                    </td>
+                  </tr>
+                ) : (
+                  visibleItems.map((item) => {
+                    const low =
+                      item.minQty !== undefined && item.qtyOnHand <= item.minQty;
+                    return (
+                      <tr key={item.id} className="hover:bg-[var(--soft)]/30">
+                        <td className="px-4 py-3.5">
+                          <div className="font-medium">
+                            {item.name}
+                            {item.density ? (
+                              <span className="ml-1.5 text-[11px] font-normal text-[var(--muted)]">
+                                ({item.density} г/мл)
+                              </span>
+                            ) : null}
                           </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3.5 text-[var(--muted)]">
-                        {item.kind === 'raw'
-                          ? 'Сырьё'
-                          : item.kind === 'semi'
-                            ? 'Полуфабрикат'
-                            : item.kind === 'packaging'
-                              ? 'Упаковка'
-                              : 'Готовое'}
-                      </td>
-                      <td className="px-4 py-3.5 text-right tabular-nums font-medium">
-                        {formatQty(item.qtyOnHand, item.unit)}
-                      </td>
-                      <td className="px-4 py-3.5 text-right tabular-nums">
-                        {formatMoneyCents(item.avgCostCents, hideAmounts)}
-                      </td>
-                      <td className="px-4 py-3.5 text-right">
-                        <div className="inline-flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => openEditItem(item)}
-                            title="Редактировать"
-                            className="p-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)]"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setHistoryItem(item)}
-                            title="История закупочных цен"
-                            className="p-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)]"
-                          >
-                            <History className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => openStocktake(item)}
-                            title="Инвентаризация"
-                            className="px-2.5 py-1.5 rounded-lg border border-[var(--line)] text-xs font-medium hover:bg-[var(--soft)] inline-flex items-center gap-1 whitespace-nowrap"
-                          >
-                            <Scale className="w-3.5 h-3.5" />
-                            <span className="hidden sm:inline">Сверка</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConsumeTarget(item)}
-                            className="px-3 py-1.5 rounded-lg border border-[var(--line)] text-xs font-medium hover:bg-[var(--soft)] whitespace-nowrap"
-                          >
-                            Списать по FEFO
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                          {data.locations.length > 1 && (
+                            <div className="text-xs text-[var(--muted)]">
+                              {resolveLocationName(data.locations, item.locationId)}
+                            </div>
+                          )}
+                          {low && (
+                            <div className="text-xs text-[var(--danger)]">
+                              Ниже минимума ({item.minQty} {item.unit})
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3.5 text-[var(--muted)]">
+                          {item.kind === 'raw'
+                            ? 'Сырьё'
+                            : item.kind === 'semi'
+                              ? 'Полуфабрикат'
+                              : item.kind === 'packaging'
+                                ? 'Упаковка'
+                                : 'Готовое'}
+                        </td>
+                        <td className="px-4 py-3.5 text-right tabular-nums font-medium">
+                          {formatQty(item.qtyOnHand, item.unit)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right tabular-nums">
+                          {formatMoneyCents(item.avgCostCents, hideAmounts)}
+                        </td>
+                        <td className="px-4 py-3.5 text-right">
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => openEditItem(item)}
+                              title="Редактировать"
+                              className="p-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)]"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setHistoryItem(item)}
+                              title="История закупочных цен"
+                              className="p-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)]"
+                            >
+                              <History className="w-3.5 h-3.5" />
+                            </button>
+                            {item.qtyOnHand > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => openTransferDrawer(item)}
+                                title="Переместить на другую точку"
+                                className="p-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)]"
+                              >
+                                <ArrowRightLeft className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => openStocktake(item)}
+                              title="Инвентаризация"
+                              className="px-2.5 py-1.5 rounded-lg border border-[var(--line)] text-xs font-medium hover:bg-[var(--soft)] inline-flex items-center gap-1 whitespace-nowrap"
+                            >
+                              <Scale className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">Сверка</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConsumeTarget(item)}
+                              className="px-3 py-1.5 rounded-lg border border-[var(--line)] text-xs font-medium hover:bg-[var(--soft)] whitespace-nowrap"
+                            >
+                              Списать по FEFO
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
@@ -835,7 +1095,7 @@ export function InventoryPage({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--line)]">
-                {sortedLots.map((lot) => {
+                {visibleLots.map((lot) => {
                   const expiredByDate =
                     Boolean(lot.expiresAt && lot.expiresAt < todayIso) &&
                     lot.status !== 'depleted';
@@ -845,7 +1105,14 @@ export function InventoryPage({
                       className={expiredByDate ? 'bg-[var(--danger-bg)]/35' : ''}
                     >
                       <td className="px-4 py-3.5 font-mono text-xs">{lot.lotCode}</td>
-                      <td className="px-4 py-3.5 font-medium">{lot.itemName}</td>
+                      <td className="px-4 py-3.5">
+                        <div className="font-medium">{lot.itemName}</div>
+                        {data.locations.length > 1 && (
+                          <div className="text-xs text-[var(--muted)]">
+                            {resolveLocationName(data.locations, lot.locationId)}
+                          </div>
+                        )}
+                      </td>
                       <td className="px-4 py-3.5 text-right tabular-nums">
                         {formatQty(lot.remainingQty, lot.unit)} /{' '}
                         {formatQty(lot.initialQty, lot.unit)}
@@ -908,6 +1175,135 @@ export function InventoryPage({
         </Card>
       )}
 
+      {tab === 'transfers' && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  ['all', 'Все'],
+                  ['in_transit', 'В пути'],
+                  ['done', 'Принятые / отменённые'],
+                ] as Array<[typeof transferFilter, string]>
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setTransferFilter(id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-medium border ${
+                    transferFilter === id
+                      ? 'border-[var(--accent)] bg-[var(--soft)]'
+                      : 'border-[var(--line)] bg-[var(--card)] text-[var(--muted)]'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => openTransferDrawer()}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium inline-flex items-center gap-1.5"
+            >
+              <ArrowRightLeft className="w-3.5 h-3.5" />
+              <span>Отправить между точками</span>
+            </button>
+          </div>
+
+          {displayedTransfers.length === 0 ? (
+            <EmptyState
+              title="Перемещений между точками пока нет"
+              description="Отправляйте готовые изделия, полуфабрикаты или сырьё с кухни/склада на витрину с приёмкой и сохранением партий FEFO."
+              actionLabel="+ Новое перемещение"
+              onAction={() => openTransferDrawer()}
+            />
+          ) : (
+            <Card className="p-0 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--line)] text-xs text-[var(--muted)]">
+                      <th className="text-left px-4 py-3 font-medium">Позиция</th>
+                      <th className="text-left px-4 py-3 font-medium">Маршрут</th>
+                      <th className="text-right px-4 py-3 font-medium">Кол-во</th>
+                      <th className="text-right px-4 py-3 font-medium">Себестоимость</th>
+                      <th className="text-left px-4 py-3 font-medium">Статус</th>
+                      <th className="text-right px-4 py-3 font-medium">Действия</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--line)]">
+                    {displayedTransfers.map((trf) => {
+                      const totalCents = Math.round(trf.qty * trf.unitCostCents);
+                      const busy = transferActionId === trf.id;
+                      return (
+                        <tr key={trf.id}>
+                          <td className="px-4 py-3.5">
+                            <div className="font-medium">{trf.itemName}</div>
+                            <div className="text-xs text-[var(--muted)]">
+                              Отправлено {trf.sentAt.slice(0, 16).replace('T', ' ')}
+                              {trf.note ? ` · ${trf.note}` : ''}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3.5 text-xs">
+                            <span className="font-medium">{trf.fromLocationName}</span> →{' '}
+                            <span className="font-medium">{trf.toLocationName}</span>
+                          </td>
+                          <td className="px-4 py-3.5 text-right tabular-nums font-medium">
+                            {formatQty(trf.qty, trf.unit)}
+                          </td>
+                          <td className="px-4 py-3.5 text-right tabular-nums">
+                            {formatMoneyCents(totalCents, hideAmounts)}
+                          </td>
+                          <td className="px-4 py-3.5 text-xs">
+                            {trf.status === 'in_transit' ? (
+                              <span className="font-medium text-[var(--accent)]">В пути</span>
+                            ) : trf.status === 'received' ? (
+                              <span className="text-emerald-700 font-medium">
+                                Принято{' '}
+                                {trf.receivedAt
+                                  ? trf.receivedAt.slice(0, 10)
+                                  : ''}
+                              </span>
+                            ) : (
+                              <span className="text-[var(--muted)]">Отменено</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3.5 text-right">
+                            {trf.status === 'in_transit' && (
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleReceiveTransfer(trf)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-60"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Принять</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => handleCancelTransfer(trf)}
+                                  title="Отменить и вернуть на точку отправления"
+                                  className="px-2.5 py-1.5 rounded-lg border border-[var(--line)] text-xs text-[var(--danger)] hover:bg-[var(--danger-bg)] inline-flex items-center gap-1 whitespace-nowrap disabled:opacity-60"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                  <span>Отмена</span>
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
+
       {tab === 'movements' && (
         <Card className="p-0 overflow-hidden">
           <div className="overflow-x-auto">
@@ -931,9 +1327,15 @@ export function InventoryPage({
                           ? 'Списание'
                           : m.kind === 'production_in'
                             ? 'Выпуск +'
-                            : m.kind === 'adjustment'
-                              ? 'Сверка'
-                              : m.kind}
+                            : m.kind === 'production_out'
+                              ? 'В производство'
+                              : m.kind === 'transfer'
+                                ? 'Перемещение'
+                                : m.kind === 'sale'
+                                  ? 'Продажа POS'
+                                  : m.kind === 'adjustment'
+                                    ? 'Сверка'
+                                    : m.kind}
                     </td>
                     <td className="px-4 py-3 font-medium">{m.itemName}</td>
                     <td className="px-4 py-3 text-right tabular-nums">
@@ -1153,6 +1555,22 @@ export function InventoryPage({
               />
             </label>
           </div>
+          {data.locations.length > 0 && (
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Точка / склад</span>
+              <select
+                value={newLocationId}
+                onChange={(e) => setNewLocationId(e.target.value)}
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              >
+                {data.locations.map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <button
             type="submit"
             className="w-full min-h-[46px] rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium"
@@ -1684,7 +2102,7 @@ export function InventoryPage({
               className="w-full min-h-[44px] px-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
             />
           </label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <label className="block space-y-1 text-sm font-medium">
               <span>Кол-во</span>
               <input
@@ -1849,6 +2267,163 @@ export function InventoryPage({
           </button>
         </div>
       </Drawer>
+
+      {/* StockTransfer Drawer */}
+      <Drawer
+        open={transferDrawerOpen}
+        title="Перемещение между точками"
+        subtitle="Списывает остаток с точки отправления и передаёт на приёмку в точку назначения"
+        onClose={() => setTransferDrawerOpen(false)}
+      >
+        {data.locations.length < 2 ? (
+          <div className="space-y-3 text-sm">
+            <p className="text-[var(--muted)]">
+              Для перемещений нужно минимум 2 точки (например, «Кухня-цех» и «Витрина Центр»).
+            </p>
+            <p className="text-xs text-[var(--muted)]">
+              Добавьте вторую точку в разделе «Настройки → Точки и адреса».
+            </p>
+          </div>
+        ) : eligibleTransferItems.length === 0 ? (
+          <div className="py-4 text-sm text-[var(--muted)]">
+            На складах нет позиций с положительным остатком для перемещения.
+          </div>
+        ) : (
+          <form onSubmit={handleCreateTransfer} className="space-y-4">
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Позиция со склада</span>
+              <select
+                value={transferItemId}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  setTransferItemId(id);
+                  setTransferLotId('');
+                  const picked = data.inventoryItems.find((i) => i.id === id);
+                  if (picked) {
+                    const fromId =
+                      picked.locationId ||
+                      defaultLocation?.id ||
+                      data.locations[0]?.id ||
+                      '';
+                    setTransferFromLocationId(fromId);
+                    if (transferToLocationId === fromId || !transferToLocationId) {
+                      setTransferToLocationId(
+                        data.locations.find((l) => l.id !== fromId)?.id || '',
+                      );
+                    }
+                    setTransferQty(String(Math.min(1, picked.qtyOnHand) || 1));
+                  }
+                }}
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              >
+                {eligibleTransferItems.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name} ({formatQty(item.qtyOnHand, item.unit)} ·{' '}
+                    {resolveLocationName(data.locations, item.locationId)})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {eligibleTransferLots.length > 0 && (
+              <label className="block space-y-1 text-sm font-medium">
+                <span>Партия FEFO (необязательно)</span>
+                <select
+                  value={transferLotId}
+                  onChange={(e) => setTransferLotId(e.target.value)}
+                  className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+                >
+                  <option value="">Без привязки к партии (общий остаток)</option>
+                  {eligibleTransferLots.map((lot) => (
+                    <option key={lot.id} value={lot.id}>
+                      {lot.lotCode} · ост. {formatQty(lot.remainingQty, lot.unit)} (до{' '}
+                      {lot.expiresAt || '—'})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block space-y-1 text-sm font-medium">
+                <span>Откуда</span>
+                <select
+                  value={transferFromLocationId}
+                  onChange={(e) => {
+                    const nextFrom = e.target.value;
+                    setTransferFromLocationId(nextFrom);
+                    if (transferToLocationId === nextFrom) {
+                      setTransferToLocationId(
+                        data.locations.find((l) => l.id !== nextFrom)?.id || '',
+                      );
+                    }
+                  }}
+                  className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+                >
+                  {data.locations.map((loc) => (
+                    <option key={loc.id} value={loc.id}>
+                      {loc.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block space-y-1 text-sm font-medium">
+                <span>Куда</span>
+                <select
+                  value={transferToLocationId}
+                  onChange={(e) => setTransferToLocationId(e.target.value)}
+                  className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+                >
+                  {data.locations
+                    .filter((loc) => loc.id !== transferFromLocationId)
+                    .map((loc) => (
+                      <option key={loc.id} value={loc.id}>
+                        {loc.name}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </div>
+
+            <label className="block space-y-1 text-sm font-medium">
+              <span>
+                Количество ({selectedTransferItem?.unit || 'шт'}
+                {selectedTransferItem
+                  ? `, доступно ${formatQty(selectedTransferItem.qtyOnHand, selectedTransferItem.unit)}`
+                  : ''}
+                )
+              </span>
+              <input
+                type="text"
+                required
+                value={transferQty}
+                onChange={(e) => setTransferQty(e.target.value)}
+                className="w-full min-h-[44px] px-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] tabular-nums"
+              />
+            </label>
+
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Комментарий (необязательно)</span>
+              <input
+                type="text"
+                value={transferNote}
+                onChange={(e) => setTransferNote(e.target.value)}
+                placeholder="Например: Утренняя витрина, курьер"
+                className="w-full min-h-[44px] px-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              />
+            </label>
+
+            <button
+              type="submit"
+              disabled={transferBusy}
+              className="w-full min-h-[46px] rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium disabled:opacity-60"
+            >
+              {transferBusy ? 'Отправляем...' : 'Отправить на точку'}
+            </button>
+          </form>
+        )}
+      </Drawer>
     </div>
   );
 }
@@ -1856,21 +2431,46 @@ export function InventoryPage({
 export function ProductionPage({
   workspace,
   data,
+  activeLocationId = '',
   hideAmounts,
   onToast,
 }: {
   workspace: Workspace;
   data: WorkspaceSnapshot;
+  activeLocationId?: string;
   hideAmounts: boolean;
   onToast: (msg: string) => void;
 }) {
+  const defaultLocation = useMemo(
+    () => resolveDefaultLocation(data.locations),
+    [data.locations],
+  );
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [recipeId, setRecipeId] = useState(data.recipes[0]?.id || '');
   const [plannedGrams, setPlannedGrams] = useState(3000);
+  const [runLocationId, setRunLocationId] = useState(
+    activeLocationId || defaultLocation?.id || '',
+  );
   const [completeTarget, setCompleteTarget] = useState<ProductionRun | null>(null);
   const [actualGramsInput, setActualGramsInput] = useState(3000);
   const [deductFefo, setDeductFefo] = useState(true);
   const [completing, setCompleting] = useState(false);
+
+  useEffect(() => {
+    setRunLocationId(activeLocationId || defaultLocation?.id || '');
+  }, [activeLocationId, defaultLocation?.id]);
+
+  const visibleRuns = useMemo(
+    () =>
+      data.productionRuns.filter((run) =>
+        matchesLocationFilter({
+          entityLocationName: run.locationName,
+          activeLocationId,
+          locations: data.locations,
+        }),
+      ),
+    [data.productionRuns, activeLocationId, data.locations],
+  );
 
   const selectedRec = useMemo(
     () => data.recipes.find((r) => r.id === recipeId) || data.recipes[0],
@@ -1908,11 +2508,13 @@ export function ProductionPage({
     const costCents = rec
       ? Math.round((rec.costCents * plannedGrams) / Math.max(rec.yieldGrams, 1))
       : 150000;
+    const targetLoc =
+      data.locations.find((l) => l.id === runLocationId) || defaultLocation;
     await createWorkspaceEntity(workspace, 'productionRuns', newId('run'), {
       recipeId: rec?.id || '',
       recipeTitle: title,
       plannedGrams,
-      locationName: data.locations[0]?.name || 'Основная студия',
+      locationName: targetLoc?.name || 'Основная студия',
       assigneeName: 'Владелец',
       totalCostCents: costCents,
       status: 'in_progress',
@@ -1986,6 +2588,12 @@ export function ProductionPage({
         rec &&
           /полуфабрикат|крем|бисквит|начинк/i.test(rec.category),
       );
+      const runLocation =
+        data.locations.find(
+          (l) =>
+            run.locationName &&
+            l.name.trim().toLowerCase() === run.locationName.trim().toLowerCase(),
+        ) || defaultLocation;
       await upsertInventoryReceipt({
         workspace,
         items: data.inventoryItems,
@@ -1995,6 +2603,7 @@ export function ProductionPage({
         unit: 'кг',
         qty: qtyKg,
         totalCostCents: resolvedCostCents,
+        locationId: runLocation?.id,
         expiresAt: new Date(
           Date.now() + Math.max(1, Math.ceil((rec?.shelfLifeHours || 72) / 24)) * 86400000,
         )
@@ -2025,7 +2634,11 @@ export function ProductionPage({
     <div className="space-y-6">
       <PageHeader
         title="Производство и выпуск партий"
-        subtitle="План-факт выпуска, проверка потребности сырья и списание FEFO"
+        subtitle={
+          activeLocationId
+            ? `Точка: ${resolveLocationName(data.locations, activeLocationId)} · план-факт выпуска и списание FEFO`
+            : 'План-факт выпуска, проверка потребности сырья и списание FEFO'
+        }
         action={
           <button
             type="button"
@@ -2037,7 +2650,7 @@ export function ProductionPage({
         }
       />
 
-      {data.productionRuns.length === 0 ? (
+      {visibleRuns.length === 0 ? (
         <EmptyState
           title="Производственных заданий нет"
           description="Запустите замес полуфабриката или партию десертов."
@@ -2046,7 +2659,7 @@ export function ProductionPage({
         />
       ) : (
         <div className="grid md:grid-cols-2 gap-4">
-          {data.productionRuns.map((run) => (
+          {visibleRuns.map((run) => (
             <Card key={run.id} className="space-y-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -2121,6 +2734,22 @@ export function ProductionPage({
               className="w-full min-h-[44px] px-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] tabular-nums"
             />
           </label>
+          {data.locations.length > 1 && (
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Точка выпуска</span>
+              <select
+                value={runLocationId}
+                onChange={(e) => setRunLocationId(e.target.value)}
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              >
+                {data.locations.map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           {bomPreview.length > 0 && (
             <div className="p-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] space-y-1.5 text-xs">

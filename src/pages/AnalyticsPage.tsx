@@ -7,6 +7,11 @@ import {
   PageHeader,
 } from '../components/UiPrimitives';
 import { netCashTotals } from '../core/calculatorCore';
+import {
+  computeLocationBreakdown,
+  matchesLocationFilter,
+  resolveLocationName,
+} from '../core/locations';
 import { formatMoneyCents } from '../core/moneyFormat';
 import { WorkspaceSnapshot } from '../firebase/workspaceService';
 
@@ -20,10 +25,12 @@ function cutoffIso(period: PeriodFilter): string | null {
 
 export function AnalyticsPage({
   data,
+  activeLocationId = '',
   hideAmounts,
   onToast,
 }: {
   data: WorkspaceSnapshot;
+  activeLocationId?: string;
   hideAmounts: boolean;
   onToast: (msg: string) => void;
 }) {
@@ -32,28 +39,45 @@ export function AnalyticsPage({
 
   const metrics = useMemo(() => {
     const ordersInPeriod = data.orders.filter(
-      (o) => !minDate || !o.dueDate || o.dueDate >= minDate,
+      (o) =>
+        (!minDate || !o.dueDate || o.dueDate >= minDate) &&
+        matchesLocationFilter({
+          entityLocationName: o.locationName,
+          activeLocationId,
+          locations: data.locations,
+        }),
     );
     const activeOrCompleted = ordersInPeriod.filter((o) => o.status !== 'cancelled');
     const recognizedOrders = ordersInPeriod.filter(
       (o) => o.status === 'delivered' || o.status === 'closed',
     );
 
-    const recognizedRevenueCents = recognizedOrders.reduce(
-      (s, o) => s + o.priceCents,
-      0,
+    const posSalesInPeriod = data.posSales.filter(
+      (s) =>
+        s.status === 'completed' &&
+        (!minDate || s.occurredAt.slice(0, 10) >= minDate) &&
+        matchesLocationFilter({
+          entityLocationId: s.locationId,
+          entityLocationName: s.locationName,
+          activeLocationId,
+          locations: data.locations,
+        }),
     );
-    const recognizedCostCents = recognizedOrders.reduce(
-      (s, o) => s + o.costCents,
-      0,
-    );
+    const posRevenueCents = posSalesInPeriod.reduce((s, p) => s + p.totalCents, 0);
+    const posCostCents = posSalesInPeriod.reduce((s, p) => s + p.costCents, 0);
+
+    const recognizedRevenueCents =
+      recognizedOrders.reduce((s, o) => s + o.priceCents, 0) + posRevenueCents;
+    const recognizedCostCents =
+      recognizedOrders.reduce((s, o) => s + o.costCents, 0) + posCostCents;
     const orderPlanTotalCents = activeOrCompleted.reduce(
       (s, o) => s + o.priceCents,
       0,
     );
+    const totalCheckCount = activeOrCompleted.length + posSalesInPeriod.length;
     const avgCheckCents =
-      activeOrCompleted.length > 0
-        ? Math.round(orderPlanTotalCents / activeOrCompleted.length)
+      totalCheckCount > 0
+        ? Math.round((orderPlanTotalCents + posRevenueCents) / totalCheckCount)
         : null;
 
     const txInPeriod = data.transactions.filter(
@@ -83,6 +107,19 @@ export function AnalyticsPage({
       };
       prev.count += 1;
       prev.totalCents += o.priceCents;
+      clientOrderCounts.set(key, prev);
+    }
+    for (const s of posSalesInPeriod) {
+      if (!s.clientId && !s.clientName) continue;
+      const name = s.clientName || 'Клиент кассы';
+      const key = s.clientId || name.toLowerCase();
+      const prev = clientOrderCounts.get(key) || {
+        name,
+        count: 0,
+        totalCents: 0,
+      };
+      prev.count += 1;
+      prev.totalCents += s.totalCents;
       clientOrderCounts.set(key, prev);
     }
     const uniqueClients = clientOrderCounts.size;
@@ -128,6 +165,29 @@ export function AnalyticsPage({
       prev.laborHoursTotal += (rec?.laborHours ?? 1.5) * scale;
       recipeStatsMap.set(key, prev);
     }
+    for (const sale of posSalesInPeriod) {
+      const ratio = sale.subtotalCents > 0 ? sale.totalCents / sale.subtotalCents : 1;
+      for (const line of sale.lines) {
+        const rec =
+          (line.recipeId ? data.recipes.find((r) => r.id === line.recipeId) : undefined) ||
+          data.recipes.find(
+            (r) => r.title.trim().toLowerCase() === line.title.trim().toLowerCase(),
+          );
+        if (!rec) continue;
+        const prev = recipeStatsMap.get(rec.id) || {
+          title: rec.title,
+          ordersCount: 0,
+          revenueCents: 0,
+          costCents: 0,
+          laborHoursTotal: 0,
+        };
+        prev.ordersCount += line.qty;
+        prev.revenueCents += Math.round(line.qty * line.unitPriceCents * ratio);
+        prev.costCents += Math.round(line.qty * line.unitCostCents);
+        prev.laborHoursTotal += (rec.laborHours ?? 1.0) * line.qty;
+        recipeStatsMap.set(rec.id, prev);
+      }
+    }
     const recipeStats = Array.from(recipeStatsMap.values()).sort(
       (a, b) => b.revenueCents - b.costCents - (a.revenueCents - a.costCents),
     );
@@ -159,11 +219,26 @@ export function AnalyticsPage({
       (a, b) => b.leads + b.clients - (a.leads + a.clients),
     );
 
-    const inventoryValueCents = data.inventoryItems.reduce(
+    const visibleInventoryItems = data.inventoryItems.filter((i) =>
+      matchesLocationFilter({
+        entityLocationId: i.locationId,
+        activeLocationId,
+        locations: data.locations,
+      }),
+    );
+    const visibleStockLots = data.stockLots.filter((l) =>
+      matchesLocationFilter({
+        entityLocationId: l.locationId,
+        activeLocationId,
+        locations: data.locations,
+      }),
+    );
+
+    const inventoryValueCents = visibleInventoryItems.reduce(
       (s, i) => s + Math.round(i.qtyOnHand * i.avgCostCents),
       0,
     );
-    const quarantineLots = data.stockLots.filter(
+    const quarantineLots = visibleStockLots.filter(
       (l) => l.status === 'quarantine' || l.status === 'expired',
     ).length;
     const issueMovementsCents = data.stockMovements
@@ -175,9 +250,17 @@ export function AnalyticsPage({
         ? (data.complaints.length / activeOrCompleted.length) * 100
         : null;
 
+    const locationBreakdown = computeLocationBreakdown({
+      locations: data.locations,
+      orders: data.orders.filter((o) => !minDate || !o.dueDate || o.dueDate >= minDate),
+      posSales: data.posSales.filter((s) => !minDate || s.occurredAt.slice(0, 10) >= minDate),
+      inventoryItems: data.inventoryItems,
+    });
+
     return {
       ordersCount: activeOrCompleted.length,
       recognizedCount: recognizedOrders.length,
+      posCount: posSalesInPeriod.length,
       recognizedRevenueCents,
       recognizedCostCents,
       grossProfitCents,
@@ -194,15 +277,17 @@ export function AnalyticsPage({
       quarantineLots,
       issueMovementsCents,
       complaintRatePct,
+      locationBreakdown,
     };
-  }, [data, minDate]);
+  }, [data, minDate, activeLocationId]);
 
   const handleExportCsv = () => {
     const lines = [
       ['Раздел', 'Показатель', 'Значение'],
       ['Заказы', 'Активных и выполненных заказов', String(metrics.ordersCount)],
-      ['Заказы', 'Признанная выручка (коп.)', String(metrics.recognizedRevenueCents)],
-      ['Заказы', 'Валовая прибыль (коп.)', String(metrics.grossProfitCents)],
+      ['Касса (POS)', 'Оплаченных чеков за период', String(metrics.posCount)],
+      ['Выручка', 'Признанная выручка заказы+POS (коп.)', String(metrics.recognizedRevenueCents)],
+      ['Выручка', 'Валовая прибыль (коп.)', String(metrics.grossProfitCents)],
       ['Деньги', 'Поступления касса (коп.)', String(metrics.cashIncomeCents)],
       ['Деньги', 'Расходы касса (коп.)', String(metrics.cashExpenseCents)],
       ['Склад', 'Стоимость остатков (коп.)', String(metrics.inventoryValueCents)],
@@ -230,7 +315,11 @@ export function AnalyticsPage({
     <div className="space-y-6">
       <PageHeader
         title="Аналитика и отчёты"
-        subtitle="Выручка, рентабельность рецептов в час, повторные заказы, каналы и склад без дублирования затрат"
+        subtitle={
+          activeLocationId
+            ? `Точка: ${resolveLocationName(data.locations, activeLocationId)} · выручка, маржа, рецепты и склад`
+            : 'Выручка, рентабельность рецептов в час, повторные заказы, каналы и склад без дублирования затрат'
+        }
         action={
           <div className="flex flex-wrap items-center gap-2">
             {(
@@ -269,7 +358,7 @@ export function AnalyticsPage({
         <MetricTile
           label="Признанная выручка"
           value={formatMoneyCents(metrics.recognizedRevenueCents, hideAmounts)}
-          hint={`Выдано/закрыто: ${metrics.recognizedCount} из ${metrics.ordersCount}`}
+          hint={`Заказы: ${metrics.recognizedCount}/${metrics.ordersCount} · Чеки POS: ${metrics.posCount}`}
         />
         <MetricTile
           label="Валовая маржа"
@@ -301,6 +390,59 @@ export function AnalyticsPage({
           }
         />
       </div>
+
+      {data.locations.length > 1 && (
+        <Card className="p-0 overflow-hidden">
+          <div className="px-5 py-4 border-b border-[var(--line)]">
+            <h2 className="text-base font-semibold">Разбивка по точкам</h2>
+            <p className="text-xs text-[var(--muted)]">
+              Сравнение признанной выручки за выбранный период и текущей стоимости остатков
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[var(--line)] text-xs text-[var(--muted)]">
+                  <th className="text-left px-4 py-3 font-medium">Точка</th>
+                  <th className="text-right px-4 py-3 font-medium">Заказы</th>
+                  <th className="text-right px-4 py-3 font-medium">Чеки POS</th>
+                  <th className="text-right px-4 py-3 font-medium">Выручка</th>
+                  <th className="text-right px-4 py-3 font-medium">Стоимость склада</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--line)] tabular-nums">
+                {metrics.locationBreakdown.map((row) => (
+                  <tr
+                    key={row.locationId}
+                    className={
+                      activeLocationId === row.locationId ? 'bg-[var(--soft)]/45' : ''
+                    }
+                  >
+                    <td className="px-4 py-3">
+                      <div className="font-medium">{row.locationName}</div>
+                      <div className="text-xs text-[var(--muted)]">
+                        {row.kind === 'kitchen'
+                          ? 'Кухня / цех'
+                          : row.kind === 'store'
+                            ? 'Витрина / точка продаж'
+                            : 'Склад'}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-right">{row.ordersCount}</td>
+                    <td className="px-4 py-3 text-right">{row.posCount}</td>
+                    <td className="px-4 py-3 text-right font-semibold">
+                      {formatMoneyCents(row.revenueCents, hideAmounts)}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {formatMoneyCents(row.inventoryValueCents, hideAmounts)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* Recipe profitability */}
       <Card className="p-0 overflow-hidden">

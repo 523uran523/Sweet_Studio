@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import {
   collection,
@@ -16,11 +16,18 @@ import {
   where,
 } from 'firebase/firestore';
 import { AppShell, NAV_ITEMS, QuickActionKind } from './components/AppShell';
-import { AuthScreen, WorkspaceOnboarding } from './components/AuthOnboarding';
+import {
+  AuthScreen,
+  EmailVerificationScreen,
+  WorkspaceOnboarding,
+} from './components/AuthOnboarding';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { QuickCreateDrawer } from './components/QuickCreateDrawer';
+import { getRolePermissions, resolveEffectiveRole, ROLE_LABELS_RU } from './core/rbac';
+import { resolveSubscriptionState } from './core/subscription';
 import { auth, db, handleFirestoreError, OperationType } from './firebase/client';
 import {
+  acceptWorkspaceInvitation,
   createWorkspaceEntity,
   newId,
   subscribeWorkspaceCollections,
@@ -42,9 +49,16 @@ import {
   TeamPage,
 } from './pages/MoneyTeamSettingsPage';
 import { LeadsPage, OrdersPage } from './pages/OrdersAndLeadsPage';
+import { PosPage } from './pages/PosPage';
 import { CalculatorPage, RecipesPage } from './pages/RecipesAndCalculatorPage';
 import { WorkHubPage } from './pages/WorkHubPage';
-import { NavSectionId, Recipe, UserProfile, Workspace } from './types/domain';
+import {
+  NavSectionId,
+  Recipe,
+  UserProfile,
+  Workspace,
+  WorkspaceInvitation,
+} from './types/domain';
 
 const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
   members: [],
@@ -68,6 +82,10 @@ const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
   contentPosts: [],
   payrollPeriods: [],
   timeEntries: [],
+  cashShifts: [],
+  posSales: [],
+  stockTransfers: [],
+  billingEvents: [],
 };
 
 function parseHashPage(): NavSectionId {
@@ -99,11 +117,14 @@ function readStoredTimer(workspaceId: string): StoredTimerState {
 function SweetStudioRoot() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [authTick, setAuthTick] = useState(0);
 
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [workspaceResolved, setWorkspaceResolved] = useState(false);
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [allWorkspaces, setAllWorkspaces] = useState<Workspace[]>([]);
+  const [pendingInvites, setPendingInvites] = useState<WorkspaceInvitation[]>([]);
+  const [acceptingInviteId, setAcceptingInviteId] = useState<string | null>(null);
   const [createWsOpen, setCreateWsOpen] = useState(false);
   const [data, setData] = useState<WorkspaceSnapshot>(EMPTY_SNAPSHOT);
 
@@ -114,6 +135,7 @@ function SweetStudioRoot() {
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [quickCreateKind, setQuickCreateKind] = useState<QuickActionKind | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [activeLocationId, setActiveLocationId] = useState<string>('');
 
   // Lifted persistent Work Timer state
   const [timerRunning, setTimerRunning] = useState(false);
@@ -153,6 +175,7 @@ function SweetStudioRoot() {
         setWorkspaceId(null);
         setWorkspace(null);
         setAllWorkspaces([]);
+        setPendingInvites([]);
         setWorkspaceResolved(false);
         setData(EMPTY_SNAPSHOT);
       }
@@ -160,30 +183,81 @@ function SweetStudioRoot() {
     return unsub;
   }, []);
 
-  // Subscribe to all workspaces owned by user (for Settings workspace switcher)
+  // Subscribe to all workspaces owned by or joined by user (for workspace switcher)
   useEffect(() => {
-    if (!authReady || !user) {
+    if (!authReady || !user || !user.emailVerified) {
       setAllWorkspaces([]);
       return;
     }
-    const q = query(collection(db, 'workspaces'), where('ownerId', '==', user.uid));
-    const unsub = onSnapshot(
-      q,
+    let ownedList: Workspace[] = [];
+    let memberList: Workspace[] = [];
+    const syncMerged = () => {
+      const merged = new Map<string, Workspace>();
+      for (const w of ownedList) merged.set(w.id, w);
+      for (const w of memberList) merged.set(w.id, w);
+      setAllWorkspaces(Array.from(merged.values()));
+    };
+
+    const unsubOwned = onSnapshot(
+      query(collection(db, 'workspaces'), where('ownerId', '==', user.uid)),
       (snap) => {
-        const list = snap.docs.map((d) => ({
+        ownedList = snap.docs.map((d) => ({
           id: d.id,
           ...(d.data() as Omit<Workspace, 'id'>),
         }));
-        setAllWorkspaces(list);
+        syncMerged();
       },
       (err) => handleFirestoreError(err, OperationType.LIST, 'workspaces'),
     );
+
+    const unsubMember = onSnapshot(
+      query(collection(db, 'workspaces'), where('memberUids', 'array-contains', user.uid)),
+      (snap) => {
+        memberList = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<Workspace, 'id'>),
+        }));
+        syncMerged();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'workspaces'),
+    );
+
+    return () => {
+      unsubOwned();
+      unsubMember();
+    };
+  }, [authReady, user, authTick]);
+
+  // Subscribe to incoming email invitations for current user
+  useEffect(() => {
+    const email = (user?.email || '').trim().toLowerCase();
+    if (!authReady || !user || !user.emailVerified || !email) {
+      setPendingInvites([]);
+      return;
+    }
+    const q = query(
+      collection(db, 'invitations'),
+      where('email', '==', email),
+      where('status', '==', 'pending'),
+    );
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        setPendingInvites(
+          snap.docs.map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<WorkspaceInvitation, 'id'>),
+          })),
+        );
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'invitations'),
+    );
     return unsub;
-  }, [authReady, user]);
+  }, [authReady, user, authTick]);
 
   // Resolve active workspace ID after auth is ready
   useEffect(() => {
-    if (!authReady || !user) return;
+    if (!authReady || !user || !user.emailVerified) return;
     let active = true;
     setWorkspaceResolved(false);
 
@@ -199,15 +273,15 @@ function SweetStudioRoot() {
           return;
         }
         try {
-          const wsSnap = await getDocs(
-            query(collection(db, 'workspaces'), where('ownerId', '==', user.uid)),
-          );
+          const [ownedSnap, memberSnap] = await Promise.all([
+            getDocs(query(collection(db, 'workspaces'), where('ownerId', '==', user.uid))),
+            getDocs(
+              query(collection(db, 'workspaces'), where('memberUids', 'array-contains', user.uid)),
+            ),
+          ]);
           if (!active) return;
-          if (!wsSnap.empty) {
-            setWorkspaceId(wsSnap.docs[0].id);
-          } else {
-            setWorkspaceId(null);
-          }
+          const firstDoc = ownedSnap.docs[0] || memberSnap.docs[0] || null;
+          setWorkspaceId(firstDoc ? firstDoc.id : null);
           setWorkspaceResolved(true);
         } catch (err) {
           handleFirestoreError(err, OperationType.LIST, 'workspaces');
@@ -220,11 +294,11 @@ function SweetStudioRoot() {
       active = false;
       unsubUser();
     };
-  }, [authReady, user]);
+  }, [authReady, user, authTick]);
 
   // Subscribe to workspace root document
   useEffect(() => {
-    if (!authReady || !user || !workspaceId) {
+    if (!authReady || !user || !user.emailVerified || !workspaceId) {
       setWorkspace(null);
       return;
     }
@@ -244,15 +318,19 @@ function SweetStudioRoot() {
       async (err) => {
         if (!active) return;
         try {
-          const wsSnap = await getDocs(
-            query(collection(db, 'workspaces'), where('ownerId', '==', user.uid)),
-          );
+          const [ownedSnap, memberSnap] = await Promise.all([
+            getDocs(query(collection(db, 'workspaces'), where('ownerId', '==', user.uid))),
+            getDocs(
+              query(collection(db, 'workspaces'), where('memberUids', 'array-contains', user.uid)),
+            ),
+          ]);
           if (!active) return;
-          if (!wsSnap.empty && wsSnap.docs[0].id !== workspaceId) {
-            setWorkspaceId(wsSnap.docs[0].id);
+          const fallbackDoc = ownedSnap.docs[0] || memberSnap.docs[0] || null;
+          if (fallbackDoc && fallbackDoc.id !== workspaceId) {
+            setWorkspaceId(fallbackDoc.id);
             return;
           }
-          if (wsSnap.empty) {
+          if (!fallbackDoc) {
             setWorkspace(null);
             setWorkspaceId(null);
             setWorkspaceResolved(true);
@@ -268,11 +346,11 @@ function SweetStudioRoot() {
       active = false;
       unsub();
     };
-  }, [authReady, user, workspaceId]);
+  }, [authReady, user, workspaceId, authTick]);
 
   // Subscribe to all 21 workspace collections once workspace is loaded
   useEffect(() => {
-    if (!authReady || !user || !workspace) {
+    if (!authReady || !user || !user.emailVerified || !workspace) {
       setData(EMPTY_SNAPSHOT);
       return;
     }
@@ -280,9 +358,9 @@ function SweetStudioRoot() {
       setData((prev) => ({ ...prev, ...partial }));
     });
     return unsub;
-  }, [authReady, user, workspace?.id, workspace?.ownerId]);
+  }, [authReady, user, authTick, workspace?.id, workspace?.ownerId]);
 
-  // Restore timer state when active workspace changes
+  // Restore timer & active location filter when active workspace changes
   useEffect(() => {
     if (!workspace?.id) return;
     const stored = readStoredTimer(workspace.id);
@@ -294,7 +372,21 @@ function SweetStudioRoot() {
     } else {
       setElapsedSec(0);
     }
+    try {
+      const savedLoc = localStorage.getItem(`sweet_loc_${workspace.id}`) || '';
+      setActiveLocationId(savedLoc);
+    } catch {
+      setActiveLocationId('');
+    }
   }, [workspace?.id]);
+
+  // Reset activeLocationId if the selected location was removed
+  useEffect(() => {
+    if (!activeLocationId || data.locations.length === 0) return;
+    if (!data.locations.some((l) => l.id === activeLocationId)) {
+      setActiveLocationId('');
+    }
+  }, [activeLocationId, data.locations]);
 
   // Tick timer every second while running
   useEffect(() => {
@@ -313,19 +405,45 @@ function SweetStudioRoot() {
     document.documentElement.setAttribute('data-theme', String(idx));
   }, [workspace, onboardingTheme, createWsOpen]);
 
-  // Fallback if current page is hidden by workspace module settings
+  const effectiveRole = useMemo(() => {
+    if (!workspace || !user) {
+      return { role: 'owner' as const, member: null, active: true };
+    }
+    return resolveEffectiveRole({
+      userUid: user.uid,
+      userEmail: user.email,
+      workspace,
+      members: data.members,
+    });
+  }, [workspace, user, data.members]);
+
+  const permissions = useMemo(
+    () => getRolePermissions(effectiveRole.role),
+    [effectiveRole.role],
+  );
+
+  const subscription = useMemo(
+    () => (workspace ? resolveSubscriptionState(workspace) : undefined),
+    [workspace],
+  );
+
+  const effectiveHideAmounts =
+    hideAmounts || (!permissions.canViewMoney && !permissions.canViewCosts);
+
+  // Fallback if current page is hidden by workspace module settings or RBAC role
   useEffect(() => {
     if (!workspace) return;
     const hidden = new Set(workspace.hiddenModules || []);
-    if (
+    const isHidden =
       activePage !== 'dashboard' &&
       activePage !== 'settings' &&
       activePage !== 'academy' &&
-      hidden.has(activePage)
-    ) {
+      hidden.has(activePage);
+    const isDisallowedByRole = !permissions.allowedSections.has(activePage);
+    if (isHidden || isDisallowedByRole) {
       navigate('dashboard');
     }
-  }, [workspace, activePage, navigate]);
+  }, [workspace, activePage, permissions, navigate]);
 
   const handleOpenInCalculator = useCallback(
     (recipe: Recipe) => {
@@ -341,6 +459,35 @@ function SweetStudioRoot() {
       navigate('orders');
     },
     [navigate],
+  );
+
+  const handleQuickCreate = useCallback(
+    (kind: QuickActionKind) => {
+      if (subscription && !subscription.canWrite) {
+        showToast('Подписка истекла — продлите доступ в Настройках');
+        return;
+      }
+      setQuickCreateKind(kind);
+    },
+    [subscription, showToast],
+  );
+
+  const handleLocationChange = useCallback(
+    (locId: string) => {
+      setActiveLocationId(locId);
+      if (workspace?.id) {
+        try {
+          if (locId) {
+            localStorage.setItem(`sweet_loc_${workspace.id}`, locId);
+          } else {
+            localStorage.removeItem(`sweet_loc_${workspace.id}`);
+          }
+        } catch {
+          // ignore storage quota errors
+        }
+      }
+    },
+    [workspace?.id],
   );
 
   const handleSwitchWorkspace = useCallback(
@@ -424,16 +571,50 @@ function SweetStudioRoot() {
     }
   }, [workspace, timerRunning, timerStartMs, timerLabel, userName, persistTimer, showToast]);
 
+  const handleAcceptInvitation = useCallback(
+    async (inv: WorkspaceInvitation) => {
+      if (!user || acceptingInviteId) return;
+      setAcceptingInviteId(inv.id);
+      try {
+        await acceptWorkspaceInvitation({
+          invitation: inv,
+          userUid: user.uid,
+          userName: user.displayName || user.email || 'Сотрудник',
+          userEmail: (user.email || inv.email).trim().toLowerCase(),
+        });
+        setCreateWsOpen(false);
+        setWorkspaceId(inv.workspaceId);
+        navigate('dashboard');
+        showToast(`Вы присоединились к «${inv.workspaceName}»`);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Не удалось принять приглашение');
+      } finally {
+        setAcceptingInviteId(null);
+      }
+    },
+    [user, acceptingInviteId, navigate, showToast],
+  );
+
   if (!authReady) {
     return (
       <div className="min-h-screen bg-[var(--bg)] text-[var(--ink)] flex items-center justify-center p-6">
-        <div className="text-sm text-[var(--muted)]">Загрузка Sweet Studio...</div>
+        <div className="text-sm text-[var(--muted)]">Загрузка SweetStudio...</div>
       </div>
     );
   }
 
   if (!user) {
     return <AuthScreen />;
+  }
+
+  if (!user.emailVerified) {
+    return (
+      <EmailVerificationScreen
+        user={user}
+        onVerified={() => setAuthTick((v) => v + 1)}
+        onSignOut={() => void signOut(auth)}
+      />
+    );
   }
 
   if (!workspaceResolved || (workspaceId && !workspace)) {
@@ -460,6 +641,33 @@ function SweetStudioRoot() {
             </button>
           </div>
         )}
+        {pendingInvites.length > 0 && (
+          <div className="max-w-2xl mx-auto px-4 pt-6 space-y-2">
+            {pendingInvites.map((inv) => (
+              <div
+                key={inv.id}
+                className="p-4 rounded-2xl border border-[var(--accent)] bg-[var(--card)] flex flex-wrap items-center justify-between gap-3"
+              >
+                <div className="text-sm">
+                  <div className="font-semibold">
+                    Приглашение в студию «{inv.workspaceName}»
+                  </div>
+                  <div className="text-xs text-[var(--muted)]">
+                    От: {inv.invitedByName} · Роль: {ROLE_LABELS_RU[inv.role] || inv.role}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={acceptingInviteId === inv.id}
+                  onClick={() => handleAcceptInvitation(inv)}
+                  className="min-h-[40px] px-4 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium disabled:opacity-60"
+                >
+                  {acceptingInviteId === inv.id ? 'Подключаем...' : 'Принять приглашение'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <WorkspaceOnboarding
           user={user}
           themeIndex={onboardingTheme}
@@ -482,10 +690,11 @@ function SweetStudioRoot() {
             workspace={workspace}
             userName={userName}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
+            canViewMoney={permissions.canViewMoney}
             onNavigate={navigate}
             onOpenOrder={handleOpenOrder}
-            onQuickCreate={setQuickCreateKind}
+            onQuickCreate={handleQuickCreate}
             onToast={showToast}
             timerRunning={timerRunning}
             elapsedSec={elapsedSec}
@@ -499,7 +708,7 @@ function SweetStudioRoot() {
           <WorkHubPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
             onOpenOrder={handleOpenOrder}
             onToast={showToast}
           />
@@ -509,7 +718,7 @@ function SweetStudioRoot() {
           <OrdersPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
             initialOrderId={selectedOrderId}
             onClearInitialOrder={() => setSelectedOrderId(null)}
             onToast={showToast}
@@ -520,7 +729,19 @@ function SweetStudioRoot() {
           <LeadsPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
+            onToast={showToast}
+          />
+        );
+      case 'pos':
+        return (
+          <PosPage
+            workspace={workspace}
+            userName={userName}
+            data={data}
+            activeLocationId={activeLocationId}
+            hideAmounts={effectiveHideAmounts}
+            canWrite={subscription?.canWrite ?? true}
             onToast={showToast}
           />
         );
@@ -529,7 +750,10 @@ function SweetStudioRoot() {
           <RecipesPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
+            userRole={effectiveRole.role}
+            member={effectiveRole.member}
+            canEditRecipes={permissions.canEditRecipes}
             onOpenInCalculator={handleOpenInCalculator}
             onToast={showToast}
           />
@@ -540,7 +764,7 @@ function SweetStudioRoot() {
             workspace={workspace}
             data={data}
             initialRecipe={calculatorSeedRecipe}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -549,7 +773,8 @@ function SweetStudioRoot() {
           <InventoryPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            activeLocationId={activeLocationId}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -558,7 +783,8 @@ function SweetStudioRoot() {
           <ProductionPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            activeLocationId={activeLocationId}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -567,7 +793,7 @@ function SweetStudioRoot() {
           <ClientsPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -576,7 +802,7 @@ function SweetStudioRoot() {
           <LoyaltyPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -594,7 +820,7 @@ function SweetStudioRoot() {
           <MarketingPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -603,7 +829,7 @@ function SweetStudioRoot() {
           <MoneyPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -611,7 +837,8 @@ function SweetStudioRoot() {
         return (
           <AnalyticsPage
             data={data}
-            hideAmounts={hideAmounts}
+            activeLocationId={activeLocationId}
+            hideAmounts={effectiveHideAmounts}
             onToast={showToast}
           />
         );
@@ -620,7 +847,11 @@ function SweetStudioRoot() {
           <TeamPage
             workspace={workspace}
             data={data}
-            hideAmounts={hideAmounts}
+            hideAmounts={effectiveHideAmounts}
+            userName={userName}
+            isOwner={workspace.ownerId === user.uid}
+            canManageTeam={permissions.canManageTeam}
+            canManagePayroll={permissions.canManagePayroll}
             onToast={showToast}
           />
         );
@@ -630,6 +861,9 @@ function SweetStudioRoot() {
             workspace={workspace}
             allWorkspaces={allWorkspaces}
             data={data}
+            currentUser={user}
+            onUserUpdated={() => setAuthTick((v) => v + 1)}
+            canManageBilling={permissions.canManageBilling}
             onSwitchWorkspace={handleSwitchWorkspace}
             onCreateWorkspace={() => setCreateWsOpen(true)}
             onToast={showToast}
@@ -648,13 +882,44 @@ function SweetStudioRoot() {
       userName={userName}
       activePage={activePage}
       onNavigate={navigate}
-      hideAmounts={hideAmounts}
+      hideAmounts={effectiveHideAmounts}
       onToggleHideAmounts={() => setHideAmounts((v) => !v)}
       onSignOut={() => void signOut(auth)}
       data={data}
-      onQuickCreate={setQuickCreateKind}
+      onQuickCreate={handleQuickCreate}
       toastMessage={toastMessage}
+      permissions={permissions}
+      subscription={subscription}
+      activeLocationId={activeLocationId}
+      onChangeLocationId={handleLocationChange}
     >
+      {pendingInvites.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {pendingInvites.map((inv) => (
+            <div
+              key={inv.id}
+              className="p-3.5 rounded-2xl border border-[var(--accent)] bg-[var(--card)] flex flex-wrap items-center justify-between gap-3"
+            >
+              <div className="text-sm">
+                <span className="font-semibold">
+                  Приглашение в студию «{inv.workspaceName}»
+                </span>
+                <span className="text-xs text-[var(--muted)] ml-2">
+                  Роль: {ROLE_LABELS_RU[inv.role] || inv.role} · От: {inv.invitedByName}
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={acceptingInviteId === inv.id}
+                onClick={() => handleAcceptInvitation(inv)}
+                className="min-h-[36px] px-3.5 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium disabled:opacity-60"
+              >
+                {acceptingInviteId === inv.id ? 'Подключаем...' : 'Принять и перейти'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {renderPage()}
       <QuickCreateDrawer
         kind={quickCreateKind}

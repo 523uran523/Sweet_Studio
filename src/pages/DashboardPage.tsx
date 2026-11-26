@@ -25,6 +25,7 @@ export function DashboardPage({
   workspace,
   data,
   hideAmounts,
+  canViewMoney = true,
   onNavigate,
   onOpenOrder,
   onQuickCreate,
@@ -38,6 +39,7 @@ export function DashboardPage({
   userName: string;
   data: WorkspaceSnapshot;
   hideAmounts: boolean;
+  canViewMoney?: boolean;
   onNavigate: (page: NavSectionId) => void;
   onOpenOrder?: (orderId: string) => void;
   onQuickCreate: (kind: QuickActionKind) => void;
@@ -133,13 +135,15 @@ export function DashboardPage({
             >
               + Новый заказ
             </button>
-            <button
-              type="button"
-              onClick={() => onQuickCreate('expense')}
-              className="min-h-[44px] px-4 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium hover:bg-[var(--soft)] whitespace-nowrap shrink-0"
-            >
-              + Расход
-            </button>
+            {canViewMoney && (
+              <button
+                type="button"
+                onClick={() => onQuickCreate('expense')}
+                className="min-h-[44px] px-4 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium hover:bg-[var(--soft)] whitespace-nowrap shrink-0"
+              >
+                + Расход
+              </button>
+            )}
           </div>
         }
       />
@@ -150,19 +154,19 @@ export function DashboardPage({
           label="Поступления"
           value={formatMoneyCents(metrics.incomeCents, hideAmounts)}
           hint={period === 'all' ? 'За всё время' : period === 'today' ? 'За сегодня' : `За ${period === '7d' ? '7' : '30'} дней`}
-          onClick={() => onNavigate('money')}
+          onClick={canViewMoney ? () => onNavigate('money') : undefined}
         />
         <MetricTile
           label="Расходы"
           value={formatMoneyCents(metrics.expenseCents, hideAmounts)}
           hint="Закупки и прочие затраты"
-          onClick={() => onNavigate('money')}
+          onClick={canViewMoney ? () => onNavigate('money') : undefined}
         />
         <MetricTile
           label="Остаток на счетах"
           value={formatMoneyCents(metrics.totalBalanceCents, hideAmounts)}
           hint={`Счетов: ${data.accounts.length}`}
-          onClick={() => onNavigate('money')}
+          onClick={canViewMoney ? () => onNavigate('money') : undefined}
         />
         <MetricTile
           label="В работе сейчас"

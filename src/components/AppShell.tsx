@@ -13,6 +13,7 @@ import {
   Home,
   Inbox,
   LogOut,
+  MapPin,
   Megaphone,
   Menu,
   Package,
@@ -20,6 +21,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Store,
   Users,
   Wallet,
   X,
@@ -27,6 +29,9 @@ import {
 import { NavSectionId, Workspace } from '../types/domain';
 import { WorkspaceSnapshot } from '../firebase/workspaceService';
 import { formatMoneyCents } from '../core/moneyFormat';
+import { ROLE_LABELS_RU, RolePermissions } from '../core/rbac';
+import { ResolvedSubscriptionState } from '../core/subscription';
+import { OfflineIndicator, PWAInstallButton } from './PwaControls';
 
 export interface NavItemDef {
   id: NavSectionId;
@@ -40,6 +45,7 @@ export const NAV_ITEMS: NavItemDef[] = [
   { id: 'work', label: 'Работа', group: 'main', icon: Briefcase },
   { id: 'orders', label: 'Заказы', group: 'ops', icon: Cake },
   { id: 'leads', label: 'Заявки', group: 'ops', icon: Inbox },
+  { id: 'pos', label: 'Касса (POS)', group: 'ops', icon: Store },
   { id: 'recipes', label: 'Рецепты', group: 'ops', icon: BookOpen },
   { id: 'calculator', label: 'Калькулятор', group: 'ops', icon: Calculator },
   { id: 'inventory', label: 'Кладовая', group: 'ops', icon: Package },
@@ -78,6 +84,10 @@ export function AppShell({
   data,
   onQuickCreate,
   toastMessage,
+  permissions,
+  subscription,
+  activeLocationId = '',
+  onChangeLocationId,
   children,
 }: {
   workspace: Workspace;
@@ -90,6 +100,10 @@ export function AppShell({
   data: WorkspaceSnapshot;
   onQuickCreate: (kind: QuickActionKind) => void;
   toastMessage: string | null;
+  permissions?: RolePermissions;
+  subscription?: ResolvedSubscriptionState;
+  activeLocationId?: string;
+  onChangeLocationId?: (locId: string) => void;
   children: React.ReactNode;
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
@@ -105,22 +119,88 @@ export function AppShell({
 
   const visibleNav = useMemo(
     () =>
-      NAV_ITEMS.filter(
-        (n) =>
+      NAV_ITEMS.filter((n) => {
+        if (permissions && !permissions.allowedSections.has(n.id)) {
+          return false;
+        }
+        return (
           n.id === 'dashboard' ||
           n.id === 'settings' ||
           n.id === 'academy' ||
-          !hiddenSet.has(n.id),
-      ),
-    [hiddenSet],
+          !hiddenSet.has(n.id)
+        );
+      }),
+    [hiddenSet, permissions],
   );
 
   const pinnedIds = useMemo(() => {
     const raw = (workspace.pins || ['work', 'orders', 'recipes']).filter((id) =>
-      visibleNav.some((v) => v.id === id),
-    );
-    return raw.slice(0, 3) as NavSectionId[];
+      visibleNav.some((v) => v.id === id && v.id !== 'dashboard'),
+    ) as NavSectionId[];
+    for (const item of visibleNav) {
+      if (raw.length >= 3) break;
+      if (item.id !== 'dashboard' && !raw.includes(item.id)) {
+        raw.push(item.id);
+      }
+    }
+    return raw.slice(0, 3);
   }, [workspace.pins, visibleNav]);
+
+  const quickActions = useMemo(() => {
+    const all: Array<{ kind: QuickActionKind; label: string; allowed: boolean }> = [
+      {
+        kind: 'order',
+        label: 'Новый заказ',
+        allowed: !permissions || permissions.allowedSections.has('orders'),
+      },
+      {
+        kind: 'lead',
+        label: 'Новая заявка',
+        allowed: !permissions || permissions.allowedSections.has('leads'),
+      },
+      {
+        kind: 'recipe',
+        label: 'Новый рецепт',
+        allowed: !permissions || permissions.canEditRecipes,
+      },
+      {
+        kind: 'task',
+        label: 'Задача в Работу',
+        allowed: !permissions || permissions.allowedSections.has('work'),
+      },
+      {
+        kind: 'expense',
+        label: 'Расход',
+        allowed: !permissions || permissions.canViewMoney,
+      },
+      {
+        kind: 'income',
+        label: 'Поступление',
+        allowed: !permissions || permissions.canViewMoney,
+      },
+      {
+        kind: 'receipt',
+        label: 'Приход на склад',
+        allowed: !permissions || permissions.allowedSections.has('inventory'),
+      },
+      {
+        kind: 'client',
+        label: 'Новый клиент',
+        allowed: !permissions || permissions.allowedSections.has('clients'),
+      },
+      {
+        kind: 'coupon',
+        label: 'Купон лояльности',
+        allowed: !permissions || permissions.allowedSections.has('loyalty'),
+      },
+      {
+        kind: 'complaint',
+        label: 'Запись контроля качества',
+        allowed: !permissions || permissions.allowedSections.has('quality'),
+      },
+    ];
+    return all.filter((a) => a.allowed);
+  }, [permissions]);
 
   const notifications = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -220,12 +300,12 @@ export function AppShell({
         <div className="flex items-center gap-3 px-2 pb-5 border-b border-[var(--line)]">
           <img
             src="/Sweet_Studio_icon.png"
-            alt="Sweet Studio"
+            alt="SweetStudio"
             className="w-9 h-9 rounded-xl object-cover shrink-0"
           />
           <div className="hidden lg:block min-w-0">
             <div className="font-semibold text-base tracking-tight font-display truncate">
-              sweet studio.
+              SweetStudio
             </div>
             <div className="text-xs text-[var(--muted)] truncate">{formatLabel}</div>
           </div>
@@ -265,8 +345,14 @@ export function AppShell({
           })}
         </nav>
 
-        <div className="hidden lg:block pt-4 border-t border-[var(--line)] text-xs text-[var(--muted)] px-2 truncate">
-          {workspace.name}
+        <div className="hidden lg:block pt-4 border-t border-[var(--line)] text-xs text-[var(--muted)] px-2 space-y-2.5">
+          <div>
+            <div className="truncate font-medium text-[var(--ink)]">{workspace.name}</div>
+            {permissions && (
+              <div className="truncate">Роль: {ROLE_LABELS_RU[permissions.role]}</div>
+            )}
+          </div>
+          <PWAInstallButton compact />
         </div>
       </aside>
 
@@ -274,15 +360,33 @@ export function AppShell({
       <div className="flex-1 min-w-0 flex flex-col pb-20 md:pb-0">
         {/* Top Bar */}
         <header className="sticky top-0 z-30 bg-[var(--bg)]/95 backdrop-blur border-b border-[var(--line)] px-4 sm:px-8 h-16 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <img
               src="/Sweet_Studio_icon.png"
-              alt="Sweet Studio"
+              alt="SweetStudio"
               className="md:hidden w-8 h-8 rounded-lg object-cover shrink-0"
             />
             <span className="font-semibold text-sm sm:text-base truncate font-display">
               {workspace.name}
             </span>
+            {data.locations.length > 0 && onChangeLocationId && (
+              <label className="hidden sm:inline-flex items-center gap-1.5 min-h-[34px] px-2.5 rounded-xl border border-[var(--line)] bg-[var(--card)] text-xs shrink-0">
+                <MapPin className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+                <select
+                  aria-label="Активная точка"
+                  value={activeLocationId}
+                  onChange={(e) => onChangeLocationId(e.target.value)}
+                  className="bg-transparent text-xs font-medium focus:outline-none max-w-[180px] truncate cursor-pointer"
+                >
+                  <option value="">Все точки</option>
+                  {data.locations.map((loc) => (
+                    <option key={loc.id} value={loc.id}>
+                      {loc.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
@@ -310,24 +414,11 @@ export function AppShell({
               </button>
 
               {quickMenuOpen && (
-                <div className="absolute right-0 mt-2 w-60 rounded-2xl border border-[var(--line)] bg-[var(--card)] p-2 shadow-lg z-40">
+                <div className="absolute right-0 mt-2 w-60 max-w-[calc(100vw-2rem)] rounded-2xl border border-[var(--line)] bg-[var(--card)] p-2 shadow-lg z-40">
                   <div className="px-2.5 py-1.5 text-xs font-medium text-[var(--muted)]">
                     Быстрые действия (Alt+N)
                   </div>
-                  {(
-                    [
-                      ['order', 'Новый заказ'],
-                      ['lead', 'Новая заявка'],
-                      ['recipe', 'Новый рецепт'],
-                      ['task', 'Задача в Работу'],
-                      ['expense', 'Расход'],
-                      ['income', 'Поступление'],
-                      ['receipt', 'Приход на склад'],
-                      ['client', 'Новый клиент'],
-                      ['coupon', 'Купон лояльности'],
-                      ['complaint', 'Запись контроля качества'],
-                    ] as Array<[QuickActionKind, string]>
-                  ).map(([kind, label]) => (
+                  {quickActions.map(({ kind, label }) => (
                     <button
                       key={kind}
                       type="button"
@@ -344,15 +435,17 @@ export function AppShell({
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={onToggleHideAmounts}
-              aria-label={hideAmounts ? 'Показать суммы' : 'Скрыть суммы'}
-              title={hideAmounts ? 'Показать суммы' : 'Скрыть суммы'}
-              className="min-w-[40px] min-h-[40px] inline-flex items-center justify-center rounded-xl border border-[var(--line)] bg-[var(--card)] hover:bg-[var(--soft)] transition-colors shrink-0"
-            >
-              {hideAmounts ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
+            {(!permissions || permissions.canViewMoney || permissions.canViewCosts) && (
+              <button
+                type="button"
+                onClick={onToggleHideAmounts}
+                aria-label={hideAmounts ? 'Показать суммы' : 'Скрыть суммы'}
+                title={hideAmounts ? 'Показать суммы' : 'Скрыть суммы'}
+                className="min-w-[40px] min-h-[40px] inline-flex items-center justify-center rounded-xl border border-[var(--line)] bg-[var(--card)] hover:bg-[var(--soft)] transition-colors shrink-0"
+              >
+                {hideAmounts ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            )}
 
             <div className="relative">
               <button
@@ -373,7 +466,7 @@ export function AppShell({
               </button>
 
               {bellOpen && (
-                <div className="absolute right-0 mt-2 w-80 rounded-2xl border border-[var(--line)] bg-[var(--card)] p-3 shadow-lg z-40 space-y-2">
+                <div className="absolute right-0 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-2xl border border-[var(--line)] bg-[var(--card)] p-3 shadow-lg z-40 space-y-2">
                   <div className="flex items-center justify-between pb-2 border-b border-[var(--line)]">
                     <span className="text-sm font-semibold">Уведомления</span>
                     <span className="text-xs text-[var(--muted)] tabular-nums">
@@ -420,8 +513,50 @@ export function AppShell({
           </div>
         </header>
 
+        {/* Mobile active location bar */}
+        {(data.locations.length > 1 || Boolean(activeLocationId)) && onChangeLocationId && (
+          <div className="sm:hidden px-4 py-2 border-b border-[var(--line)] bg-[var(--card)]/70 flex items-center justify-between gap-2">
+            <span className="text-xs text-[var(--muted)] inline-flex items-center gap-1.5 shrink-0">
+              <MapPin className="w-3.5 h-3.5 text-[var(--accent)]" />
+              <span>Точка</span>
+            </span>
+            <select
+              aria-label="Активная точка на мобильном"
+              value={activeLocationId}
+              onChange={(e) => onChangeLocationId(e.target.value)}
+              className="min-h-[34px] px-2.5 rounded-lg border border-[var(--line)] bg-[var(--bg)] text-xs font-medium max-w-[210px] truncate"
+            >
+              <option value="">Все точки</option>
+              {data.locations.map((loc) => (
+                <option key={loc.id} value={loc.id}>
+                  {loc.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {/* Main Content */}
         <main className="flex-1 px-4 sm:px-8 py-6 max-w-[1280px] w-full mx-auto">
+          <OfflineIndicator />
+          {subscription && (subscription.effectiveStatus === 'grace' || subscription.effectiveStatus === 'expired') && (
+            <div className="mb-5 p-3.5 rounded-2xl border border-[var(--line)] bg-[var(--warm)] flex flex-wrap items-center justify-between gap-3 text-sm">
+              <span>
+                {subscription.effectiveStatus === 'expired'
+                  ? 'Срок подписки SweetStudio истёк — доступен режим чтения и экспорта.'
+                  : `Льготный период подписки: осталось ${subscription.daysLeft} дн. до перехода в режим чтения.`}
+              </span>
+              {(!permissions || permissions.canManageSettings) && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate('settings')}
+                  className="px-3 py-1.5 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium whitespace-nowrap"
+                >
+                  Продлить подписку
+                </button>
+              )}
+            </div>
+          )}
           {children}
         </main>
       </div>
@@ -469,7 +604,7 @@ export function AppShell({
       {mobileMenuOpen && (
         <div className="md:hidden fixed inset-0 z-40 bg-[var(--bg)] p-4 pb-24 overflow-y-auto">
           <div className="flex items-center justify-between pb-4 border-b border-[var(--line)]">
-            <span className="text-lg font-semibold">Разделы Sweet Studio</span>
+            <span className="text-lg font-semibold">Разделы SweetStudio</span>
             <button
               type="button"
               onClick={() => setMobileMenuOpen(false)}
@@ -478,6 +613,25 @@ export function AppShell({
               <X className="w-5 h-5" />
             </button>
           </div>
+          {data.locations.length > 0 && onChangeLocationId && (
+            <label className="mt-4 flex items-center gap-2 min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm">
+              <MapPin className="w-4 h-4 text-[var(--accent)] shrink-0" />
+              <span className="text-xs text-[var(--muted)] shrink-0">Точка:</span>
+              <select
+                aria-label="Активная точка в меню"
+                value={activeLocationId}
+                onChange={(e) => onChangeLocationId(e.target.value)}
+                className="flex-1 bg-transparent text-sm font-medium focus:outline-none min-w-0"
+              >
+                <option value="">Все точки</option>
+                {data.locations.map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <div className="grid grid-cols-2 gap-2.5 mt-4">
             {visibleNav.map((item) => {
               const Icon = item.icon;
@@ -501,14 +655,17 @@ export function AppShell({
               );
             })}
           </div>
-          <button
-            type="button"
-            onClick={onSignOut}
-            className="mt-6 w-full min-h-[44px] rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium flex items-center justify-center gap-2"
-          >
-            <LogOut className="w-4 h-4" />
-            <span>Выйти ({userName})</span>
-          </button>
+          <div className="mt-6 space-y-2.5">
+            <PWAInstallButton compact />
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="w-full min-h-[44px] rounded-xl border border-[var(--line)] bg-[var(--card)] text-sm font-medium flex items-center justify-center gap-2"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Выйти ({userName})</span>
+            </button>
+          </div>
         </div>
       )}
 

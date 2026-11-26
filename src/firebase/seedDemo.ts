@@ -58,6 +58,11 @@ export async function createWorkspaceWithOptionalDemo(params: {
       pins: ['work', 'orders', 'recipes'],
       hiddenModules,
       demoLoaded: withDemo,
+      plan: 'trial',
+      subscriptionStatus: 'trialing',
+      trialEndsAt: addDaysIso(14),
+      graceEndsAt: addDaysIso(21),
+      ...(ownerEmail ? { billingEmail: ownerEmail.slice(0, 200) } : {}),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });

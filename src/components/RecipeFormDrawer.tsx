@@ -38,6 +38,38 @@ import {
   Workspace,
 } from '../types/domain';
 import { compressImageFileToDataUrl } from '../utils/imageCompress';
+import {
+  clearFormDraft,
+  formatDraftTimeRu,
+  readFormDraft,
+  recipeDraftKey,
+  sanitizeDraftPhotoUrl,
+  writeFormDraft,
+} from '../utils/draftStorage';
+
+interface RecipeFormDraftData {
+  title: string;
+  category: string;
+  status: Recipe['status'];
+  yieldGrams: number;
+  yieldPortions: number;
+  formSize: string;
+  shelfLifeHours: number;
+  storageCondition: string;
+  favorite: boolean;
+  photoUrl: string;
+  rows: EditableIngredientRow[];
+  packVariants: RecipePackVariant[];
+  laborHours: number;
+  laborRateRub: string;
+  packagingRub: string;
+  overheadPercent: number;
+  marginPercent: number;
+  customPriceEnabled: boolean;
+  customPriceRub: string;
+  steps: string[];
+  allergens: string[];
+}
 
 export type RecipeFormMode = 'create' | 'edit' | 'version' | 'variation';
 
@@ -144,14 +176,58 @@ export function RecipeFormDrawer({
   ]);
   const [customAllergen, setCustomAllergen] = useState('');
   const [saving, setSaving] = useState(false);
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+  const draftHydratedRef = useRef(false);
+
+  const applyBlankCreateDefaults = () => {
+    setTitle('');
+    setCategory('Торты');
+    setStatus('draft');
+    setYieldGrams(1500);
+    setYieldPortions(10);
+    setFormSize('D18');
+    setShelfLifeHours(72);
+    setStorageCondition('+2…+4 °C');
+    setFavorite(false);
+    setPhotoUrl(RECIPE_IMAGES.berryCake);
+    setRows([
+      {
+        rowKey: `ing_init_${Date.now()}`,
+        name: 'Сливочный сыр',
+        qty: 500,
+        unit: 'г',
+        lossPercent: 2,
+        priceCents: 95000,
+        priceUnit: 'за кг',
+        isPackaging: false,
+      },
+    ]);
+    setPackVariants([]);
+    setLaborHours(1.5);
+    setLaborRateRub('650');
+    setPackagingRub('220');
+    setOverheadPercent(10);
+    setMarginPercent(65);
+    setCustomPriceEnabled(false);
+    setCustomPriceRub('');
+    setSteps([
+      'Подготовить ингредиенты и взвесить по граммовкам.',
+      'Выпечь основу / собрать изделие и стабилизировать при +4 °C.',
+    ]);
+    setAllergens(['Молочные продукты', 'Глютен', 'Яйца']);
+  };
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      draftHydratedRef.current = false;
+      return;
+    }
 
     if (
       (mode === 'edit' || mode === 'version' || mode === 'variation') &&
       sourceRecipe
     ) {
+      setDraftSavedAt(null);
       setTitle(
         mode === 'variation'
           ? `${sourceRecipe.title} (вариация)`
@@ -196,41 +272,36 @@ export function RecipeFormDrawer({
       );
       setAllergens(sourceRecipe.allergens ? [...sourceRecipe.allergens] : []);
     } else {
-      setTitle('');
-      setCategory('Торты');
-      setStatus('draft');
-      setYieldGrams(1500);
-      setYieldPortions(10);
-      setFormSize('D18');
-      setShelfLifeHours(72);
-      setStorageCondition('+2…+4 °C');
-      setFavorite(false);
-      setPhotoUrl(RECIPE_IMAGES.berryCake);
-      setRows([
-        {
-          rowKey: `ing_init_${Date.now()}`,
-          name: 'Сливочный сыр',
-          qty: 500,
-          unit: 'г',
-          lossPercent: 2,
-          priceCents: 95000,
-          priceUnit: 'за кг',
-          isPackaging: false,
-        },
-      ]);
-      setPackVariants([]);
-      setLaborHours(1.5);
-      setLaborRateRub('650');
-      setPackagingRub('220');
-      setOverheadPercent(10);
-      setMarginPercent(65);
-      setCustomPriceEnabled(false);
-      setCustomPriceRub('');
-      setSteps([
-        'Подготовить ингредиенты и взвесить по граммовкам.',
-        'Выпечь основу / собрать изделие и стабилизировать при +4 °C.',
-      ]);
-      setAllergens(['Молочные продукты', 'Глютен', 'Яйца']);
+      const saved = readFormDraft<RecipeFormDraftData>(recipeDraftKey(workspace.id));
+      if (saved?.data) {
+        const d = saved.data;
+        setTitle(d.title || '');
+        setCategory(d.category || 'Торты');
+        setStatus(d.status || 'draft');
+        setYieldGrams(d.yieldGrams || 1500);
+        setYieldPortions(d.yieldPortions || 10);
+        setFormSize(d.formSize || '');
+        setShelfLifeHours(d.shelfLifeHours || 72);
+        setStorageCondition(d.storageCondition || '+2…+4 °C');
+        setFavorite(Boolean(d.favorite));
+        setPhotoUrl(d.photoUrl || RECIPE_IMAGES.berryCake);
+        setRows(Array.isArray(d.rows) ? d.rows : []);
+        setPackVariants(Array.isArray(d.packVariants) ? d.packVariants : []);
+        setLaborHours(d.laborHours ?? 1.5);
+        setLaborRateRub(d.laborRateRub ?? '650');
+        setPackagingRub(d.packagingRub ?? '220');
+        setOverheadPercent(d.overheadPercent ?? 10);
+        setMarginPercent(d.marginPercent ?? 65);
+        setCustomPriceEnabled(Boolean(d.customPriceEnabled));
+        setCustomPriceRub(d.customPriceRub || '');
+        setSteps(Array.isArray(d.steps) && d.steps.length > 0 ? d.steps : ['']);
+        setAllergens(Array.isArray(d.allergens) ? d.allergens : []);
+        setDraftSavedAt(saved.savedAt);
+      } else {
+        applyBlankCreateDefaults();
+        setDraftSavedAt(null);
+      }
+      draftHydratedRef.current = true;
     }
     setIngredientMode('list');
     setMatrixFilter('');
@@ -238,7 +309,75 @@ export function RecipeFormDrawer({
     setSelectedInvId('');
     setSelectedSubRecipeId('');
     setSaving(false);
-  }, [open, mode, sourceRecipe]);
+  }, [open, mode, sourceRecipe, workspace.id]);
+
+  useEffect(() => {
+    if (!open || mode !== 'create' || !draftHydratedRef.current) return;
+    const isModifiedFromDefault = Boolean(
+      title.trim() ||
+        category !== 'Торты' ||
+        rows.length !== 1 ||
+        rows[0]?.name !== 'Сливочный сыр' ||
+        rows[0]?.qty !== 500 ||
+        packVariants.length > 0 ||
+        customPriceRub.trim() ||
+        steps.length !== 2,
+    );
+    if (!isModifiedFromDefault) return;
+    const timer = window.setTimeout(() => {
+      const payload: RecipeFormDraftData = {
+        title,
+        category,
+        status,
+        yieldGrams,
+        yieldPortions,
+        formSize,
+        shelfLifeHours,
+        storageCondition,
+        favorite,
+        photoUrl: sanitizeDraftPhotoUrl(photoUrl),
+        rows,
+        packVariants,
+        laborHours,
+        laborRateRub,
+        packagingRub,
+        overheadPercent,
+        marginPercent,
+        customPriceEnabled,
+        customPriceRub,
+        steps,
+        allergens,
+      };
+      const stored = writeFormDraft(recipeDraftKey(workspace.id), payload);
+      if (stored) setDraftSavedAt(stored.savedAt);
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [
+    open,
+    mode,
+    workspace.id,
+    title,
+    category,
+    status,
+    yieldGrams,
+    yieldPortions,
+    formSize,
+    shelfLifeHours,
+    storageCondition,
+    favorite,
+    photoUrl,
+    rows,
+    packVariants,
+    laborHours,
+    laborRateRub,
+    packagingRub,
+    overheadPercent,
+    marginPercent,
+    customPriceEnabled,
+    customPriceRub,
+    steps,
+    allergens,
+  ]);
 
   const { edibleMaterialsCents, packagingMaterialsCents, grossGrams } = useMemo(() => {
     let edible = 0;
@@ -654,6 +793,10 @@ export function RecipeFormDrawer({
               ? `Вариация «${title.trim()}» создана`
               : `Рецепт «${title.trim()}» сохранён`,
         );
+        if (mode === 'create') {
+          clearFormDraft(recipeDraftKey(workspace.id));
+          setDraftSavedAt(null);
+        }
         onSaved?.(recId);
       }
       onClose();
@@ -693,6 +836,25 @@ export function RecipeFormDrawer({
       onClose={onClose}
     >
       <form onSubmit={handleSubmit} className="space-y-6 pb-4">
+        {mode === 'create' && draftSavedAt && (
+          <div className="px-3.5 py-2 rounded-xl border border-[var(--line)] bg-[var(--soft)] flex items-center justify-between gap-2 text-xs">
+            <span className="text-[var(--muted)]">
+              Черновик автосохранён в {formatDraftTimeRu(draftSavedAt)}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                clearFormDraft(recipeDraftKey(workspace.id));
+                applyBlankCreateDefaults();
+                setDraftSavedAt(null);
+                onToast('Черновик рецепта очищен');
+              }}
+              className="font-medium text-[var(--ink)] hover:underline whitespace-nowrap"
+            >
+              Очистить
+            </button>
+          </div>
+        )}
         {/* 1. Photo block */}
         <section className="space-y-3 p-4 rounded-2xl border border-[var(--line)] bg-[var(--bg)]">
           <div className="flex items-center justify-between gap-2">

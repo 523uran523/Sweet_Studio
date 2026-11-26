@@ -39,7 +39,8 @@ import {
   updateWorkspaceEntity,
   WorkspaceSnapshot,
 } from '../firebase/workspaceService';
-import { Recipe, RecipeIngredientLine, Workspace } from '../types/domain';
+import { filterVisibleRecipesForRole } from '../core/rbac';
+import { Recipe, RecipeIngredientLine, UserRole, Workspace, WorkspaceMember } from '../types/domain';
 
 interface CalcTariffProfile {
   overheadPct: number;
@@ -66,12 +67,18 @@ export function RecipesPage({
   workspace,
   data,
   hideAmounts,
+  userRole = 'owner',
+  member = null,
+  canEditRecipes = true,
   onOpenInCalculator,
   onToast,
 }: {
   workspace: Workspace;
   data: WorkspaceSnapshot;
   hideAmounts: boolean;
+  userRole?: UserRole;
+  member?: WorkspaceMember | null;
+  canEditRecipes?: boolean;
   onOpenInCalculator: (recipe: Recipe) => void;
   onToast: (msg: string) => void;
 }) {
@@ -86,28 +93,33 @@ export function RecipesPage({
   const [formMode, setFormMode] = useState<RecipeFormMode>('create');
   const [formSourceRecipe, setFormSourceRecipe] = useState<Recipe | null>(null);
 
+  const roleVisibleRecipes = useMemo(
+    () => filterVisibleRecipesForRole(data.recipes, userRole, member),
+    [data.recipes, userRole, member],
+  );
+
   const activeRecipe = useMemo(
     () =>
       selectedRecipe
-        ? data.recipes.find((r) => r.id === selectedRecipe.id) || selectedRecipe
+        ? roleVisibleRecipes.find((r) => r.id === selectedRecipe.id) || selectedRecipe
         : null,
-    [data.recipes, selectedRecipe],
+    [roleVisibleRecipes, selectedRecipe],
   );
 
   const categories = useMemo(() => {
     const set = new Set<string>(['Все', 'Торты', 'Капкейки', 'Десерты']);
-    data.recipes.forEach((r) => set.add(r.category));
+    roleVisibleRecipes.forEach((r) => set.add(r.category));
     return Array.from(set);
-  }, [data.recipes]);
+  }, [roleVisibleRecipes]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return data.recipes.filter((r) => {
+    return roleVisibleRecipes.filter((r) => {
       if (categoryFilter !== 'Все' && r.category !== categoryFilter) return false;
       if (q && !`${r.title} ${r.category}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [data.recipes, categoryFilter, search]);
+  }, [roleVisibleRecipes, categoryFilter, search]);
 
   const openDetail = (r: Recipe) => {
     setSelectedRecipe(r);
@@ -191,13 +203,15 @@ export function RecipesPage({
         title="Мои рецепты"
         subtitle="Фотографии, версии технологических карт, аллергены и пересчёт веса"
         action={
-          <button
-            type="button"
-            onClick={() => openForm('create')}
-            className="min-h-[44px] px-4 py-2 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium whitespace-nowrap shrink-0"
-          >
-            + Рецепт
-          </button>
+          canEditRecipes ? (
+            <button
+              type="button"
+              onClick={() => openForm('create')}
+              className="min-h-[44px] px-4 py-2 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium whitespace-nowrap shrink-0"
+            >
+              + Рецепт
+            </button>
+          ) : undefined
         }
       />
 
@@ -570,30 +584,34 @@ export function RecipesPage({
               >
                 Создать заказ ({Math.round(targetWeightGrams)} г)
               </button>
-              <button
-                type="button"
-                onClick={() => openForm('edit', activeRecipe)}
-                className="min-h-[42px] px-3 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-xs font-medium inline-flex items-center justify-center gap-1.5 hover:bg-[var(--soft)]"
-              >
-                <Pencil className="w-3.5 h-3.5" />
-                <span>Редактировать</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => openForm('version', activeRecipe)}
-                className="min-h-[42px] px-3 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-xs font-medium inline-flex items-center justify-center gap-1.5 hover:bg-[var(--soft)]"
-              >
-                <CopyPlus className="w-3.5 h-3.5" />
-                <span>Новая версия v{activeRecipe.version + 1}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => openForm('variation', activeRecipe)}
-                className="min-h-[42px] px-3 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-xs font-medium inline-flex items-center justify-center gap-1.5 hover:bg-[var(--soft)]"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Вариация вкуса</span>
-              </button>
+              {canEditRecipes && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => openForm('edit', activeRecipe)}
+                    className="min-h-[42px] px-3 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-xs font-medium inline-flex items-center justify-center gap-1.5 hover:bg-[var(--soft)]"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    <span>Редактировать</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openForm('version', activeRecipe)}
+                    className="min-h-[42px] px-3 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-xs font-medium inline-flex items-center justify-center gap-1.5 hover:bg-[var(--soft)]"
+                  >
+                    <CopyPlus className="w-3.5 h-3.5" />
+                    <span>Новая версия v{activeRecipe.version + 1}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openForm('variation', activeRecipe)}
+                    className="min-h-[42px] px-3 py-2 rounded-xl border border-[var(--line)] bg-[var(--card)] text-xs font-medium inline-flex items-center justify-center gap-1.5 hover:bg-[var(--soft)]"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Вариация вкуса</span>
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => {

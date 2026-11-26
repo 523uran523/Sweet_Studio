@@ -1,4 +1,5 @@
 import {
+  arrayUnion,
   collection,
   deleteDoc,
   doc,
@@ -12,8 +13,11 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
+import { computeNextBillingDates, SUBSCRIPTION_PRICE_CENTS } from '../core/subscription';
 import {
   Account,
+  BillingEvent,
+  CashShift,
   Client,
   Complaint,
   ContentPost,
@@ -24,16 +28,22 @@ import {
   MoneyTransaction,
   Order,
   PayrollPeriod,
+  PayType,
+  PosSale,
+  PosSaleLine,
   ProductionRun,
   Purchase,
   Recipe,
   RecurringPayment,
   StockLot,
   StockMovement,
+  StockTransfer,
   Supplier,
   TimeEntry,
+  UserRole,
   WorkItem,
   Workspace,
+  WorkspaceInvitation,
   WorkspaceMember,
 } from '../types/domain';
 import { db, handleFirestoreError, OperationType } from './client';
@@ -53,6 +63,7 @@ export interface WorkspaceSnapshot {
   inventoryItems: InventoryItem[];
   stockLots: StockLot[];
   stockMovements: StockMovement[];
+  stockTransfers: StockTransfer[];
   suppliers: Supplier[];
   purchases: Purchase[];
   clients: Client[];
@@ -68,6 +79,9 @@ export interface WorkspaceSnapshot {
   contentPosts: ContentPost[];
   payrollPeriods: PayrollPeriod[];
   timeEntries: TimeEntry[];
+  cashShifts: CashShift[];
+  posSales: PosSale[];
+  billingEvents: BillingEvent[];
 }
 
 export function subscribeWorkspaceCollections(
@@ -95,6 +109,7 @@ export function subscribeWorkspaceCollections(
   sub('inventoryItems', 'inventoryItems');
   sub('stockLots', 'stockLots');
   sub('stockMovements', 'stockMovements');
+  sub('stockTransfers', 'stockTransfers');
   sub('suppliers', 'suppliers');
   sub('purchases', 'purchases');
   sub('clients', 'clients');
@@ -110,6 +125,9 @@ export function subscribeWorkspaceCollections(
   sub('contentPosts', 'contentPosts');
   sub('payrollPeriods', 'payrollPeriods');
   sub('timeEntries', 'timeEntries');
+  sub('cashShifts', 'cashShifts');
+  sub('posSales', 'posSales');
+  sub('billingEvents', 'billingEvents');
 
   return () => unsubs.forEach((u) => u());
 }
@@ -648,6 +666,7 @@ export async function upsertInventoryReceipt(params: {
   reason: string;
   movementKind?: StockMovement['kind'];
   account?: Account;
+  locationId?: string;
 }): Promise<string> {
   const {
     workspace,
@@ -663,14 +682,23 @@ export async function upsertInventoryReceipt(params: {
     reason,
     movementKind = 'receipt',
     account,
+    locationId,
   } = params;
   const matched =
     (existingItemId ? items.find((i) => i.id === existingItemId) : undefined) ||
     items.find(
       (i) =>
         i.name.trim().toLowerCase() === name.trim().toLowerCase() &&
-        i.unit.trim().toLowerCase() === unit.trim().toLowerCase(),
-    );
+        i.unit.trim().toLowerCase() === unit.trim().toLowerCase() &&
+        (locationId ? i.locationId === locationId : !i.locationId),
+    ) ||
+    (!locationId
+      ? items.find(
+          (i) =>
+            i.name.trim().toLowerCase() === name.trim().toLowerCase() &&
+            i.unit.trim().toLowerCase() === unit.trim().toLowerCase(),
+        )
+      : undefined);
 
   const itemId = matched?.id || newId('inv');
   const lotId = newId('lot');
@@ -698,7 +726,7 @@ export async function upsertInventoryReceipt(params: {
           updatedAt: now,
         });
       } else {
-        tx.set(itemRef, {
+        const itemPayload: Record<string, unknown> = {
           workspaceId: workspace.id,
           ownerId: workspace.ownerId,
           name: name.slice(0, 140),
@@ -710,10 +738,12 @@ export async function upsertInventoryReceipt(params: {
           avgCostCents: unitCostCents,
           createdAt: now,
           updatedAt: now,
-        });
+        };
+        if (locationId) itemPayload.locationId = locationId;
+        tx.set(itemRef, itemPayload);
       }
 
-      tx.set(doc(db, 'workspaces', workspace.id, 'stockLots', lotId), {
+      const lotPayload: Record<string, unknown> = {
         workspaceId: workspace.id,
         ownerId: workspace.ownerId,
         itemId,
@@ -727,7 +757,11 @@ export async function upsertInventoryReceipt(params: {
         status: 'active',
         createdAt: now,
         updatedAt: now,
-      });
+      };
+      if (locationId || matched?.locationId) {
+        lotPayload.locationId = locationId || matched?.locationId;
+      }
+      tx.set(doc(db, 'workspaces', workspace.id, 'stockLots', lotId), lotPayload);
 
       tx.set(doc(db, 'workspaces', workspace.id, 'stockMovements', movId), {
         workspaceId: workspace.id,
@@ -1159,3 +1193,791 @@ export async function transferBetweenAccounts(params: {
     handleFirestoreError(err, OperationType.WRITE, path);
   }
 }
+
+/**
+ * Open a POS cash shift.
+ */
+export async function openCashShift(params: {
+  workspace: Workspace;
+  locationId?: string;
+  locationName: string;
+  accountId: string;
+  cashierName: string;
+  openingCashCents: number;
+}): Promise<string> {
+  const { workspace, locationId, locationName, accountId, cashierName, openingCashCents } = params;
+  const shiftId = newId('shf');
+  const payload: Record<string, unknown> = {
+    locationName: locationName.slice(0, 120),
+    accountId,
+    cashierName: cashierName.slice(0, 120),
+    openedAt: new Date().toISOString(),
+    openingCashCents: Math.max(0, Math.round(openingCashCents)),
+    cashSalesCents: 0,
+    cardSalesCents: 0,
+    refundsCents: 0,
+    cashInCents: 0,
+    cashOutCents: 0,
+    salesCount: 0,
+    status: 'open',
+  };
+  if (locationId) payload.locationId = locationId;
+  await createWorkspaceEntity(workspace, 'cashShifts', shiftId, payload);
+  return shiftId;
+}
+
+/**
+ * Close a POS cash shift with Z-report discrepancy.
+ */
+export async function closeCashShift(params: {
+  workspace: Workspace;
+  shift: CashShift;
+  closingActualCashCents: number;
+  closingDiscrepancyCents: number;
+}) {
+  const { workspace, shift, closingActualCashCents, closingDiscrepancyCents } = params;
+  await updateWorkspaceEntity(workspace, 'cashShifts', shift.id, {
+    status: 'closed',
+    closedAt: new Date().toISOString(),
+    closingActualCashCents: Math.round(closingActualCashCents),
+    closingDiscrepancyCents: Math.round(closingDiscrepancyCents),
+  });
+}
+
+/**
+ * Complete a POS sale: records PosSale, updates active CashShift, updates Account + MoneyTransaction,
+ * deducts finished/inventory stock (FEFO when lots exist, otherwise direct qty decrement), and redeems coupon.
+ */
+export async function recordPosSale(params: {
+  workspace: Workspace;
+  shift?: CashShift | null;
+  location?: LocationItem | null;
+  account: Account;
+  cashierName: string;
+  paymentMethod: 'cash' | 'card';
+  lines: PosSaleLine[];
+  subtotalCents: number;
+  discountCents: number;
+  totalCents: number;
+  costCents: number;
+  receiptNumber: string;
+  client?: Client;
+  coupon?: Coupon;
+  inventoryItems: InventoryItem[];
+  stockLots: StockLot[];
+}): Promise<string> {
+  const {
+    workspace,
+    shift,
+    location,
+    account,
+    cashierName,
+    paymentMethod,
+    lines,
+    subtotalCents,
+    discountCents,
+    totalCents,
+    costCents,
+    receiptNumber,
+    client,
+    coupon,
+    inventoryItems,
+    stockLots,
+  } = params;
+
+  // Step 1: Deduct stock for linked inventory items (FEFO if eligible lots exist, else direct decrement)
+  let workingLots = stockLots;
+  const qtyByItem = new Map<string, number>();
+  for (const item of inventoryItems) {
+    qtyByItem.set(item.id, item.qtyOnHand);
+  }
+  for (const line of lines) {
+    if (!line.itemId || line.qty <= 0) continue;
+    const baseItem = inventoryItems.find((i) => i.id === line.itemId);
+    if (!baseItem) continue;
+    const currentQty = qtyByItem.get(baseItem.id) ?? baseItem.qtyOnHand;
+    const item = { ...baseItem, qtyOnHand: currentQty };
+    const today = new Date().toISOString().slice(0, 10);
+    const eligibleLots = workingLots.filter(
+      (l) =>
+        l.itemId === item.id &&
+        l.status === 'active' &&
+        l.remainingQty > 0 &&
+        (!l.expiresAt || l.expiresAt >= today),
+    );
+    const totalLotAvail = eligibleLots.reduce((s, l) => s + l.remainingQty, 0);
+    if (totalLotAvail + 1e-9 >= line.qty) {
+      const res = await consumeInventoryFefo({
+        workspace,
+        item,
+        lots: workingLots,
+        qtyToConsume: line.qty,
+        reason: `Продажа POS ${receiptNumber}`,
+      });
+      workingLots = res.updatedLots;
+      qtyByItem.set(item.id, Math.max(0, Math.round((currentQty - line.qty) * 1000) / 1000));
+    } else {
+      const nextQty = Math.max(0, Math.round((currentQty - line.qty) * 1000) / 1000);
+      qtyByItem.set(item.id, nextQty);
+      await updateWorkspaceEntity(workspace, 'inventoryItems', item.id, {
+        qtyOnHand: nextQty,
+      });
+      await createWorkspaceEntity(workspace, 'stockMovements', newId('mov'), {
+        kind: 'sale',
+        itemId: item.id,
+        itemName: item.name.slice(0, 140),
+        qty: line.qty,
+        unit: item.unit.slice(0, 24),
+        totalCents: Math.round(line.qty * line.unitCostCents),
+        reason: `Продажа POS ${receiptNumber}`.slice(0, 200),
+      });
+    }
+  }
+
+  // Step 2: Atomic financial + shift + POS sale + coupon write
+  const saleId = newId('pos');
+  const txId = newId('tx');
+  const path = `workspaces/${workspace.id}/posSales/${saleId}`;
+  try {
+    await runTransaction(db, async (tx) => {
+      const accRef = doc(db, 'workspaces', workspace.id, 'accounts', account.id);
+      const accSnap = await tx.get(accRef);
+      if (!accSnap.exists()) throw new Error('Счёт не найден');
+
+      const shiftRef = shift
+        ? doc(db, 'workspaces', workspace.id, 'cashShifts', shift.id)
+        : null;
+      const shiftSnap = shiftRef ? await tx.get(shiftRef) : null;
+
+      const couponRef = coupon
+        ? doc(db, 'workspaces', workspace.id, 'coupons', coupon.id)
+        : null;
+      const couponSnap = couponRef ? await tx.get(couponRef) : null;
+
+      const now = serverTimestamp();
+      const prevBal = Number(accSnap.data().balanceCents || 0);
+      if (totalCents > 0) {
+        tx.update(accRef, {
+          balanceCents: prevBal + totalCents,
+          updatedAt: now,
+        });
+        tx.set(doc(db, 'workspaces', workspace.id, 'transactions', txId), {
+          workspaceId: workspace.id,
+          ownerId: workspace.ownerId,
+          kind: 'income',
+          category: 'Продажа на кассе',
+          amountCents: totalCents,
+          accountId: account.id,
+          accountName: account.name.slice(0, 100),
+          note: `Чек ${receiptNumber}${client ? ` (${client.name})` : ''}`.slice(0, 240),
+          occurredAt: new Date().toISOString().slice(0, 10),
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
+      if (shiftRef && shiftSnap && shiftSnap.exists() && shiftSnap.data().status === 'open') {
+        const sData = shiftSnap.data();
+        tx.update(shiftRef, {
+          cashSalesCents:
+            Number(sData.cashSalesCents || 0) + (paymentMethod === 'cash' ? totalCents : 0),
+          cardSalesCents:
+            Number(sData.cardSalesCents || 0) + (paymentMethod === 'card' ? totalCents : 0),
+          salesCount: Number(sData.salesCount || 0) + 1,
+          updatedAt: now,
+        });
+      }
+
+      if (couponRef && couponSnap && couponSnap.exists() && couponSnap.data().status === 'active') {
+        tx.update(couponRef, {
+          status: 'redeemed',
+          redeemedOrderId: saleId,
+          updatedAt: now,
+        });
+      }
+
+      const salePayload: Record<string, unknown> = {
+        workspaceId: workspace.id,
+        ownerId: workspace.ownerId,
+        receiptNumber: receiptNumber.slice(0, 40),
+        cashierName: cashierName.slice(0, 120),
+        paymentMethod,
+        accountId: account.id,
+        lines,
+        subtotalCents: Math.round(subtotalCents),
+        discountCents: Math.round(discountCents),
+        totalCents: Math.round(totalCents),
+        costCents: Math.round(costCents),
+        status: 'completed',
+        occurredAt: new Date().toISOString(),
+        createdAt: now,
+        updatedAt: now,
+      };
+      const saleLocationId = shift?.locationId || location?.id;
+      const saleLocationName = shift?.locationName || location?.name;
+      if (shift?.id) salePayload.shiftId = shift.id;
+      if (saleLocationId) salePayload.locationId = saleLocationId;
+      if (saleLocationName) salePayload.locationName = saleLocationName.slice(0, 120);
+      if (client?.id) salePayload.clientId = client.id;
+      if (client?.name) salePayload.clientName = client.name.slice(0, 140);
+      if (coupon?.code) salePayload.couponCode = coupon.code.slice(0, 40);
+
+      tx.set(doc(db, 'workspaces', workspace.id, 'posSales', saleId), salePayload);
+    });
+    return saleId;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+    return saleId;
+  }
+}
+
+/**
+ * Refund a completed POS sale atomically.
+ */
+export async function refundPosSale(params: {
+  workspace: Workspace;
+  sale: PosSale;
+  account: Account;
+  shift?: CashShift | null;
+}) {
+  const { workspace, sale, account, shift } = params;
+  if (sale.status === 'refunded') return;
+  const txId = newId('tx');
+  const path = `workspaces/${workspace.id}/posSales/${sale.id}`;
+  try {
+    await runTransaction(db, async (tx) => {
+      const saleRef = doc(db, 'workspaces', workspace.id, 'posSales', sale.id);
+      const accRef = doc(db, 'workspaces', workspace.id, 'accounts', account.id);
+      const [saleSnap, accSnap] = await Promise.all([tx.get(saleRef), tx.get(accRef)]);
+      if (!saleSnap.exists() || saleSnap.data().status === 'refunded') return;
+      if (!accSnap.exists()) throw new Error('Счёт не найден');
+
+      const shiftRef = shift
+        ? doc(db, 'workspaces', workspace.id, 'cashShifts', shift.id)
+        : null;
+      const shiftSnap = shiftRef ? await tx.get(shiftRef) : null;
+
+      const now = serverTimestamp();
+      tx.update(saleRef, {
+        status: 'refunded',
+        updatedAt: now,
+      });
+      if (sale.totalCents > 0) {
+        tx.update(accRef, {
+          balanceCents: Number(accSnap.data().balanceCents || 0) - sale.totalCents,
+          updatedAt: now,
+        });
+        tx.set(doc(db, 'workspaces', workspace.id, 'transactions', txId), {
+          workspaceId: workspace.id,
+          ownerId: workspace.ownerId,
+          kind: 'expense',
+          category: 'Возврат по чеку',
+          amountCents: sale.totalCents,
+          accountId: account.id,
+          accountName: account.name.slice(0, 100),
+          note: `Возврат чека ${sale.receiptNumber}`.slice(0, 240),
+          occurredAt: new Date().toISOString().slice(0, 10),
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      if (
+        sale.paymentMethod === 'cash' &&
+        shiftRef &&
+        shiftSnap &&
+        shiftSnap.exists() &&
+        shiftSnap.data().status === 'open'
+      ) {
+        tx.update(shiftRef, {
+          refundsCents: Number(shiftSnap.data().refundsCents || 0) + sale.totalCents,
+          updatedAt: now,
+        });
+      }
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * Create a single-use employee invitation in top-level /invitations collection.
+ */
+export async function createWorkspaceInvitation(params: {
+  workspace: Workspace;
+  email: string;
+  invitedByName: string;
+  role: Exclude<UserRole, 'owner'>;
+  payType: PayType;
+  rateCents?: number;
+  percent?: number;
+}): Promise<string> {
+  const { workspace, email, invitedByName, role, payType, rateCents, percent } = params;
+  const inviteId = newId('inv');
+  const cleanEmail = email.trim().toLowerCase().slice(0, 200);
+  const path = `invitations/${inviteId}`;
+  try {
+    await setDoc(doc(db, 'invitations', inviteId), {
+      workspaceId: workspace.id,
+      workspaceName: workspace.name.slice(0, 120),
+      ownerId: workspace.ownerId,
+      email: cleanEmail,
+      invitedByName: (invitedByName || 'Владелец').slice(0, 120),
+      role,
+      payType,
+      rateCents: Math.max(0, Math.round(rateCents || 0)),
+      percent: Math.max(0, Number(percent || 0)),
+      status: 'pending',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return inviteId;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, path);
+    return inviteId;
+  }
+}
+
+export async function revokeWorkspaceInvitation(inviteId: string) {
+  const path = `invitations/${inviteId}`;
+  try {
+    await updateDoc(doc(db, 'invitations', inviteId), {
+      status: 'revoked',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+/**
+ * Atomically accept an invitation: creates /workspaces/{wsId}/members/{uid},
+ * appends uid to workspace.memberUids, marks invitation accepted, and sets activeWorkspaceId.
+ */
+export async function acceptWorkspaceInvitation(params: {
+  invitation: WorkspaceInvitation;
+  userUid: string;
+  userName: string;
+  userEmail: string;
+}) {
+  const { invitation, userUid, userName, userEmail } = params;
+  const path = `invitations/${invitation.id}`;
+  try {
+    const batch = writeBatch(db);
+    const now = serverTimestamp();
+
+    const memberRef = doc(db, 'workspaces', invitation.workspaceId, 'members', userUid);
+    const memberPayload: Record<string, unknown> = {
+      workspaceId: invitation.workspaceId,
+      ownerId: invitation.ownerId,
+      uid: userUid,
+      inviteId: invitation.id,
+      name: (userName || userEmail || 'Сотрудник').slice(0, 120),
+      email: userEmail.trim().toLowerCase().slice(0, 200),
+      role: invitation.role,
+      payType: invitation.payType,
+      rateCents: invitation.rateCents || 0,
+      percent: invitation.percent || 0,
+      active: true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (invitation.allowedRecipeIds) memberPayload.allowedRecipeIds = invitation.allowedRecipeIds;
+    if (invitation.locationId) memberPayload.locationId = invitation.locationId;
+
+    batch.set(memberRef, memberPayload);
+    batch.update(doc(db, 'workspaces', invitation.workspaceId), {
+      memberUids: arrayUnion(userUid),
+      updatedAt: now,
+    });
+    batch.update(doc(db, 'invitations', invitation.id), {
+      status: 'accepted',
+      acceptedByUid: userUid,
+      updatedAt: now,
+    });
+    batch.set(
+      doc(db, 'users', userUid),
+      {
+        uid: userUid,
+        displayName: (userName || userEmail || 'Сотрудник').slice(0, 120),
+        email: userEmail.trim().toLowerCase().slice(0, 200),
+        activeWorkspaceId: invitation.workspaceId,
+        createdAt: now,
+        updatedAt: now,
+      },
+      { merge: true },
+    );
+
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * Record SaaS subscription payment & extend workspace period using subscription.ts.
+ */
+export async function recordSubscriptionPayment(params: {
+  workspace: Workspace;
+  months?: number;
+  provider?: string;
+}) {
+  const { workspace, months = 1, provider = 'manual_pilot' } = params;
+  const eventId = newId('bil');
+  const { currentPeriodEnd, graceEndsAt } = computeNextBillingDates(
+    workspace.currentPeriodEnd,
+    months,
+  );
+  const amountCents = SUBSCRIPTION_PRICE_CENTS * Math.max(1, months);
+  const path = `workspaces/${workspace.id}/billingEvents/${eventId}`;
+
+  try {
+    const batch = writeBatch(db);
+    const now = serverTimestamp();
+    batch.set(doc(db, 'workspaces', workspace.id, 'billingEvents', eventId), {
+      workspaceId: workspace.id,
+      ownerId: workspace.ownerId,
+      idempotencyKey: eventId,
+      plan: 'pro',
+      amountCents,
+      periodMonths: Math.max(1, months),
+      status: 'paid',
+      provider: provider.slice(0, 60),
+      occurredAt: new Date().toISOString().slice(0, 10),
+      createdAt: now,
+      updatedAt: now,
+    });
+    batch.update(doc(db, 'workspaces', workspace.id), {
+      plan: 'pro',
+      subscriptionStatus: 'active',
+      currentPeriodEnd,
+      graceEndsAt,
+      lastPaymentId: eventId,
+      updatedAt: now,
+    });
+    await batch.commit();
+    return { currentPeriodEnd, graceEndsAt, amountCents };
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+    return { currentPeriodEnd, graceEndsAt, amountCents };
+  }
+}
+
+/**
+ * Send stock (raw, semi-finished, packaging, or finished goods) from one location to another.
+ * Atomically deducts source inventory & lot and creates an `in_transit` StockTransfer record.
+ */
+export async function createStockTransfer(params: {
+  workspace: Workspace;
+  sourceItem: InventoryItem;
+  sourceLot?: StockLot;
+  fromLocation: LocationItem;
+  toLocation: LocationItem;
+  qty: number;
+  note?: string;
+}): Promise<string> {
+  const { workspace, sourceItem, sourceLot, fromLocation, toLocation, qty, note } = params;
+  const cleanQty = Math.round(qty * 1000) / 1000;
+  if (cleanQty <= 0) {
+    throw new Error('Укажите положительное количество для перемещения');
+  }
+  if (fromLocation.id === toLocation.id) {
+    throw new Error('Точка отправления и точка назначения должны отличаться');
+  }
+
+  const transferId = newId('trf');
+  const movId = newId('mov');
+  const path = `workspaces/${workspace.id}/stockTransfers/${transferId}`;
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const itemRef = doc(db, 'workspaces', workspace.id, 'inventoryItems', sourceItem.id);
+      const lotRef = sourceLot
+        ? doc(db, 'workspaces', workspace.id, 'stockLots', sourceLot.id)
+        : null;
+
+      const [itemSnap, lotSnap] = await Promise.all([
+        tx.get(itemRef),
+        lotRef ? tx.get(lotRef) : Promise.resolve(null),
+      ]);
+      if (!itemSnap.exists()) {
+        throw new Error('Позиция склада не найдена');
+      }
+
+      const curItemQty = Number(itemSnap.data().qtyOnHand || 0);
+      if (curItemQty + 1e-9 < cleanQty) {
+        throw new Error(`Недостаточно остатка «${sourceItem.name}» (доступно ${curItemQty} ${sourceItem.unit})`);
+      }
+
+      let unitCostCents = Math.max(0, Math.round(Number(itemSnap.data().avgCostCents || 0)));
+      const now = serverTimestamp();
+
+      if (lotRef && lotSnap && lotSnap.exists()) {
+        const curLotQty = Number(lotSnap.data().remainingQty || 0);
+        if (curLotQty + 1e-9 < cleanQty) {
+          throw new Error(
+            `В выбранной партии ${sourceLot?.lotCode || ''} недостаточно остатка (${curLotQty} ${sourceItem.unit})`,
+          );
+        }
+        unitCostCents = Math.max(0, Math.round(Number(lotSnap.data().unitCostCents || unitCostCents)));
+        const nextLotQty = Math.max(0, Math.round((curLotQty - cleanQty) * 1000) / 1000);
+        tx.update(lotRef, {
+          remainingQty: nextLotQty,
+          status: nextLotQty <= 0 ? 'depleted' : 'active',
+          updatedAt: now,
+        });
+      }
+
+      const nextItemQty = Math.max(0, Math.round((curItemQty - cleanQty) * 1000) / 1000);
+      tx.update(itemRef, {
+        qtyOnHand: nextItemQty,
+        updatedAt: now,
+      });
+
+      const transferPayload: Record<string, unknown> = {
+        workspaceId: workspace.id,
+        ownerId: workspace.ownerId,
+        itemId: sourceItem.id,
+        itemName: sourceItem.name.slice(0, 140),
+        fromLocationId: fromLocation.id,
+        fromLocationName: fromLocation.name.slice(0, 120),
+        toLocationId: toLocation.id,
+        toLocationName: toLocation.name.slice(0, 120),
+        qty: cleanQty,
+        unit: sourceItem.unit.slice(0, 24),
+        unitCostCents,
+        status: 'in_transit',
+        sentAt: new Date().toISOString(),
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (sourceLot?.id) transferPayload.lotId = sourceLot.id;
+      if (note && note.trim()) transferPayload.note = note.trim().slice(0, 200);
+
+      tx.set(doc(db, 'workspaces', workspace.id, 'stockTransfers', transferId), transferPayload);
+
+      const movPayload: Record<string, unknown> = {
+        workspaceId: workspace.id,
+        ownerId: workspace.ownerId,
+        kind: 'transfer',
+        itemId: sourceItem.id,
+        itemName: sourceItem.name.slice(0, 140),
+        qty: cleanQty,
+        unit: sourceItem.unit.slice(0, 24),
+        totalCents: Math.round(cleanQty * unitCostCents),
+        reason: `Отправка: ${fromLocation.name} → ${toLocation.name}`.slice(0, 200),
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (sourceLot?.id) movPayload.lotId = sourceLot.id;
+      tx.set(doc(db, 'workspaces', workspace.id, 'stockMovements', movId), movPayload);
+    });
+    return transferId;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+    return transferId;
+  }
+}
+
+/**
+ * Accept an `in_transit` StockTransfer at the destination location.
+ * Creates/updates InventoryItem & StockLot at `toLocationId` and marks transfer `received`.
+ */
+export async function receiveStockTransfer(params: {
+  workspace: Workspace;
+  transfer: StockTransfer;
+  inventoryItems: InventoryItem[];
+  stockLots: StockLot[];
+}) {
+  const { workspace, transfer, inventoryItems, stockLots } = params;
+  if (transfer.status !== 'in_transit') return;
+
+  const sourceItem = inventoryItems.find((i) => i.id === transfer.itemId);
+  const sourceLot = transfer.lotId
+    ? stockLots.find((l) => l.id === transfer.lotId)
+    : undefined;
+
+  const destExisting = inventoryItems.find(
+    (i) =>
+      i.name.trim().toLowerCase() === transfer.itemName.trim().toLowerCase() &&
+      i.unit.trim().toLowerCase() === transfer.unit.trim().toLowerCase() &&
+      (transfer.toLocationId ? i.locationId === transfer.toLocationId : !i.locationId),
+  );
+
+  const destItemId = destExisting?.id || newId('inv');
+  const destLotId = newId('lot');
+  const movId = newId('mov');
+  const totalCents = Math.round(transfer.qty * transfer.unitCostCents);
+  const path = `workspaces/${workspace.id}/stockTransfers/${transfer.id}`;
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const trfRef = doc(db, 'workspaces', workspace.id, 'stockTransfers', transfer.id);
+      const destItemRef = doc(db, 'workspaces', workspace.id, 'inventoryItems', destItemId);
+      const [trfSnap, destSnap] = await Promise.all([
+        tx.get(trfRef),
+        destExisting ? tx.get(destItemRef) : Promise.resolve(null),
+      ]);
+      if (!trfSnap.exists() || trfSnap.data().status !== 'in_transit') {
+        throw new Error('Перемещение уже обработано');
+      }
+
+      const now = serverTimestamp();
+
+      if (destSnap && destSnap.exists()) {
+        const curQty = Number(destSnap.data().qtyOnHand || 0);
+        const curAvg = Number(destSnap.data().avgCostCents || 0);
+        const nextQty = Math.round((curQty + transfer.qty) * 1000) / 1000;
+        const nextAvg =
+          nextQty > 0
+            ? Math.round((curQty * curAvg + totalCents) / nextQty)
+            : transfer.unitCostCents;
+        tx.update(destItemRef, {
+          qtyOnHand: nextQty,
+          avgCostCents: nextAvg,
+          updatedAt: now,
+        });
+      } else {
+        const itemPayload: Record<string, unknown> = {
+          workspaceId: workspace.id,
+          ownerId: workspace.ownerId,
+          name: transfer.itemName.slice(0, 140),
+          kind: sourceItem?.kind || 'finished',
+          category: (sourceItem?.category || 'Перемещение').slice(0, 80),
+          unit: transfer.unit.slice(0, 24),
+          qtyOnHand: transfer.qty,
+          minQty: sourceItem?.minQty ?? 1,
+          avgCostCents: transfer.unitCostCents,
+          createdAt: now,
+          updatedAt: now,
+        };
+        if (sourceItem?.density && sourceItem.density > 0) {
+          itemPayload.density = sourceItem.density;
+        }
+        if (transfer.toLocationId) {
+          itemPayload.locationId = transfer.toLocationId;
+        }
+        tx.set(destItemRef, itemPayload);
+      }
+
+      const lotPayload: Record<string, unknown> = {
+        workspaceId: workspace.id,
+        ownerId: workspace.ownerId,
+        itemId: destItemId,
+        itemName: transfer.itemName.slice(0, 140),
+        lotCode: `ТР-${new Date().toISOString().slice(5, 10).replace('-', '')}`,
+        unit: transfer.unit.slice(0, 24),
+        initialQty: transfer.qty,
+        remainingQty: transfer.qty,
+        unitCostCents: transfer.unitCostCents,
+        expiresAt:
+          sourceLot?.expiresAt ||
+          new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+        status: 'active',
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (transfer.toLocationId) lotPayload.locationId = transfer.toLocationId;
+      tx.set(doc(db, 'workspaces', workspace.id, 'stockLots', destLotId), lotPayload);
+
+      tx.set(doc(db, 'workspaces', workspace.id, 'stockMovements', movId), {
+        workspaceId: workspace.id,
+        ownerId: workspace.ownerId,
+        kind: 'transfer',
+        itemId: destItemId,
+        itemName: transfer.itemName.slice(0, 140),
+        lotId: destLotId,
+        qty: transfer.qty,
+        unit: transfer.unit.slice(0, 24),
+        totalCents,
+        reason: `Приёмка: ${transfer.fromLocationName} → ${transfer.toLocationName}`.slice(0, 200),
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      tx.update(trfRef, {
+        status: 'received',
+        receivedAt: new Date().toISOString(),
+        updatedAt: now,
+      });
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * Cancel an `in_transit` StockTransfer and return quantity back to the source location.
+ */
+export async function cancelStockTransfer(params: {
+  workspace: Workspace;
+  transfer: StockTransfer;
+  note?: string;
+}) {
+  const { workspace, transfer, note } = params;
+  if (transfer.status !== 'in_transit') return;
+
+  const movId = newId('mov');
+  const path = `workspaces/${workspace.id}/stockTransfers/${transfer.id}`;
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const trfRef = doc(db, 'workspaces', workspace.id, 'stockTransfers', transfer.id);
+      const itemRef = doc(db, 'workspaces', workspace.id, 'inventoryItems', transfer.itemId);
+      const lotRef = transfer.lotId
+        ? doc(db, 'workspaces', workspace.id, 'stockLots', transfer.lotId)
+        : null;
+
+      const [trfSnap, itemSnap, lotSnap] = await Promise.all([
+        tx.get(trfRef),
+        tx.get(itemRef),
+        lotRef ? tx.get(lotRef) : Promise.resolve(null),
+      ]);
+      if (!trfSnap.exists() || trfSnap.data().status !== 'in_transit') {
+        throw new Error('Перемещение уже обработано');
+      }
+
+      const now = serverTimestamp();
+
+      if (itemSnap.exists()) {
+        const curQty = Number(itemSnap.data().qtyOnHand || 0);
+        tx.update(itemRef, {
+          qtyOnHand: Math.round((curQty + transfer.qty) * 1000) / 1000,
+          updatedAt: now,
+        });
+      }
+      if (lotRef && lotSnap && lotSnap.exists()) {
+        const curLotQty = Number(lotSnap.data().remainingQty || 0);
+        tx.update(lotRef, {
+          remainingQty: Math.round((curLotQty + transfer.qty) * 1000) / 1000,
+          status: 'active',
+          updatedAt: now,
+        });
+      }
+
+      tx.set(doc(db, 'workspaces', workspace.id, 'stockMovements', movId), {
+        workspaceId: workspace.id,
+        ownerId: workspace.ownerId,
+        kind: 'transfer',
+        itemId: transfer.itemId,
+        itemName: transfer.itemName.slice(0, 140),
+        ...(transfer.lotId ? { lotId: transfer.lotId } : {}),
+        qty: transfer.qty,
+        unit: transfer.unit.slice(0, 24),
+        totalCents: Math.round(transfer.qty * transfer.unitCostCents),
+        reason: `Возврат отменённого перемещения на ${transfer.fromLocationName}`.slice(0, 200),
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const trfPatch: Record<string, unknown> = {
+        status: 'cancelled',
+        updatedAt: now,
+      };
+      if (note && note.trim()) trfPatch.note = note.trim().slice(0, 200);
+      tx.update(trfRef, trfPatch);
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+

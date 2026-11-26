@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Copy, Merge, Printer, QrCode, Star } from 'lucide-react';
+import { QrCodeSvg } from '../components/QrCodeSvg';
 import {
   Card,
   Drawer,
@@ -664,56 +665,6 @@ export function ClientsPage({
   );
 }
 
-function SimpleQrSvg({ value }: { value: string }) {
-  const cells = useMemo(() => {
-    const size = 15;
-    let hash = 2166136261;
-    for (let i = 0; i < value.length; i++) {
-      hash ^= value.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    const grid: boolean[] = [];
-    for (let r = 0; r < size; r++) {
-      for (let c = 0; c < size; c++) {
-        const inFinder =
-          (r < 4 && c < 4) ||
-          (r < 4 && c >= size - 4) ||
-          (r >= size - 4 && c < 4);
-        if (inFinder) {
-          const fr = r >= size - 4 ? r - (size - 4) : r;
-          const fc = c >= size - 4 ? c - (size - 4) : c;
-          grid.push(fr === 0 || fr === 3 || fc === 0 || fc === 3 || (fr >= 1 && fr <= 2 && fc >= 1 && fc <= 2));
-        } else {
-          hash ^= (r * 31 + c * 17) & 0xff;
-          hash = Math.imul(hash, 16777619);
-          grid.push((hash & 1) === 1);
-        }
-      }
-    }
-    return { size, grid };
-  }, [value]);
-
-  return (
-    <svg
-      viewBox={`0 0 ${cells.size} ${cells.size}`}
-      className="w-28 h-28 rounded-lg bg-white p-1.5 border border-[var(--line)]"
-      aria-label={`QR-код для ${value}`}
-    >
-      {cells.grid.map((on, i) =>
-        on ? (
-          <rect
-            key={i}
-            x={i % cells.size}
-            y={Math.floor(i / cells.size)}
-            width={1}
-            height={1}
-            fill="#141414"
-          />
-        ) : null,
-      )}
-    </svg>
-  );
-}
 
 export function LoyaltyPage({
   workspace,
@@ -866,7 +817,7 @@ export function LoyaltyPage({
                 {previewCoupon.code}
               </div>
               <div className="flex justify-center">
-                <SimpleQrSvg value={`${workspace.name}:${previewCoupon.code}`} />
+                <QrCodeSvg value={previewCoupon.code} />
               </div>
               <div className="text-lg font-semibold">
                 Скидка{' '}

@@ -127,6 +127,8 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'name', 'slogan', 'businessFormat', 'ownerId', 'memberUids',
           'themeIndex', 'density', 'pins', 'hiddenModules', 'demoLoaded',
+          'plan', 'subscriptionStatus', 'trialEndsAt', 'currentPeriodEnd',
+          'graceEndsAt', 'billingEmail', 'lastPaymentId',
           'createdAt', 'updatedAt'
         ])
         && isNonEmptyStr(data.name, 120)
@@ -139,6 +141,40 @@ service cloud.firestore {
         && (!('pins' in data) || isValidStrList(data.pins, 3, 60))
         && (!('hiddenModules' in data) || isValidStrList(data.hiddenModules, 30, 60))
         && isOptBool(data, 'demoLoaded')
+        && (!('plan' in data) || data.plan in ['trial', 'pro'])
+        && (!('subscriptionStatus' in data) || data.subscriptionStatus in ['trialing', 'active', 'past_due', 'expired'])
+        && isOptStr(data, 'trialEndsAt', 40)
+        && isOptStr(data, 'currentPeriodEnd', 40)
+        && isOptStr(data, 'graceEndsAt', 40)
+        && isOptStr(data, 'billingEmail', 200)
+        && isOptStr(data, 'lastPaymentId', 128)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInvitation(data) {
+      return data.keys().hasAll([
+          'workspaceId', 'workspaceName', 'ownerId', 'email', 'invitedByName',
+          'role', 'payType', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'workspaceId', 'workspaceName', 'ownerId', 'email', 'invitedByName',
+          'role', 'payType', 'rateCents', 'percent', 'allowedRecipeIds',
+          'locationId', 'status', 'acceptedByUid', 'createdAt', 'updatedAt'
+        ])
+        && isNonEmptyStr(data.workspaceId, 128)
+        && isNonEmptyStr(data.workspaceName, 120)
+        && isNonEmptyStr(data.ownerId, 128)
+        && isNonEmptyStr(data.email, 200)
+        && isNonEmptyStr(data.invitedByName, 120)
+        && data.role in ['admin', 'confectioner', 'seller', 'marketer', 'storekeeper', 'accountant']
+        && data.payType in ['hourly', 'piece', 'percent', 'salary', 'mixed']
+        && isOptInt(data, 'rateCents')
+        && isOptNum(data, 'percent')
+        && (!('allowedRecipeIds' in data) || isValidStrList(data.allowedRecipeIds, 100, 128))
+        && isOptStr(data, 'locationId', 128)
+        && data.status in ['pending', 'accepted', 'revoked']
+        && isOptStr(data, 'acceptedByUid', 128)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -146,18 +182,22 @@ service cloud.firestore {
     function isValidMember(data, workspaceId) {
       return data.keys().hasAll(['workspaceId', 'ownerId', 'name', 'role', 'payType', 'active', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
-          'workspaceId', 'ownerId', 'uid', 'name', 'email', 'role',
-          'payType', 'rateCents', 'percent', 'active', 'createdAt', 'updatedAt'
+          'workspaceId', 'ownerId', 'uid', 'inviteId', 'name', 'email', 'role',
+          'payType', 'rateCents', 'percent', 'allowedRecipeIds', 'locationId',
+          'active', 'createdAt', 'updatedAt'
         ])
         && data.workspaceId == workspaceId
         && isNonEmptyStr(data.ownerId, 128)
         && isOptStr(data, 'uid', 128)
+        && isOptStr(data, 'inviteId', 128)
         && isNonEmptyStr(data.name, 120)
         && isOptStr(data, 'email', 200)
         && data.role in ['owner', 'admin', 'confectioner', 'seller', 'marketer', 'storekeeper', 'accountant']
         && data.payType in ['hourly', 'piece', 'percent', 'salary', 'mixed']
         && isOptInt(data, 'rateCents')
         && isOptNum(data, 'percent')
+        && (!('allowedRecipeIds' in data) || isValidStrList(data.allowedRecipeIds, 100, 128))
+        && isOptStr(data, 'locationId', 128)
         && data.active is bool
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -280,6 +320,38 @@ service cloud.firestore {
         && isNonEmptyStr(data.unit, 24)
         && data.totalCents is int
         && isOptStr(data, 'reason', 200)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidStockTransfer(data, workspaceId) {
+      return data.keys().hasAll([
+          'workspaceId', 'ownerId', 'itemId', 'itemName', 'fromLocationName',
+          'toLocationName', 'qty', 'unit', 'unitCostCents', 'status', 'sentAt',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'workspaceId', 'ownerId', 'itemId', 'itemName', 'lotId',
+          'fromLocationId', 'fromLocationName', 'toLocationId', 'toLocationName',
+          'qty', 'unit', 'unitCostCents', 'status', 'note', 'sentAt', 'receivedAt',
+          'createdAt', 'updatedAt'
+        ])
+        && data.workspaceId == workspaceId
+        && isNonEmptyStr(data.ownerId, 128)
+        && isNonEmptyStr(data.itemId, 128)
+        && isNonEmptyStr(data.itemName, 140)
+        && isOptStr(data, 'lotId', 128)
+        && isOptStr(data, 'fromLocationId', 128)
+        && isNonEmptyStr(data.fromLocationName, 120)
+        && isOptStr(data, 'toLocationId', 128)
+        && isNonEmptyStr(data.toLocationName, 120)
+        && data.qty is number && data.qty > 0
+        && isNonEmptyStr(data.unit, 24)
+        && data.unitCostCents is int && data.unitCostCents >= 0
+        && data.status in ['in_transit', 'received', 'cancelled']
+        && isOptStr(data, 'note', 200)
+        && isNonEmptyStr(data.sentAt, 40)
+        && isOptStr(data, 'receivedAt', 40)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -498,6 +570,100 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidCashShift(data, workspaceId) {
+      return data.keys().hasAll([
+          'workspaceId', 'ownerId', 'locationName', 'accountId', 'cashierName',
+          'openedAt', 'openingCashCents', 'cashSalesCents', 'cardSalesCents',
+          'refundsCents', 'cashInCents', 'cashOutCents', 'salesCount', 'status',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'workspaceId', 'ownerId', 'locationId', 'locationName', 'accountId',
+          'cashierName', 'openedAt', 'closedAt', 'openingCashCents',
+          'cashSalesCents', 'cardSalesCents', 'refundsCents', 'cashInCents',
+          'cashOutCents', 'salesCount', 'closingActualCashCents',
+          'closingDiscrepancyCents', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.workspaceId == workspaceId
+        && isNonEmptyStr(data.ownerId, 128)
+        && isOptStr(data, 'locationId', 128)
+        && isNonEmptyStr(data.locationName, 120)
+        && isNonEmptyStr(data.accountId, 128)
+        && isNonEmptyStr(data.cashierName, 120)
+        && isNonEmptyStr(data.openedAt, 40)
+        && isOptStr(data, 'closedAt', 40)
+        && data.openingCashCents is int && data.openingCashCents >= 0
+        && data.cashSalesCents is int && data.cashSalesCents >= 0
+        && data.cardSalesCents is int && data.cardSalesCents >= 0
+        && data.refundsCents is int && data.refundsCents >= 0
+        && data.cashInCents is int && data.cashInCents >= 0
+        && data.cashOutCents is int && data.cashOutCents >= 0
+        && data.salesCount is int && data.salesCount >= 0
+        && isOptInt(data, 'closingActualCashCents')
+        && isOptInt(data, 'closingDiscrepancyCents')
+        && data.status in ['open', 'closed']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPosSale(data, workspaceId) {
+      return data.keys().hasAll([
+          'workspaceId', 'ownerId', 'receiptNumber', 'cashierName',
+          'paymentMethod', 'accountId', 'lines', 'subtotalCents',
+          'discountCents', 'totalCents', 'costCents', 'status', 'occurredAt',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'workspaceId', 'ownerId', 'receiptNumber', 'shiftId', 'locationId',
+          'locationName', 'clientId', 'clientName', 'cashierName', 'paymentMethod',
+          'accountId', 'lines', 'subtotalCents', 'discountCents', 'totalCents',
+          'costCents', 'couponCode', 'status', 'occurredAt', 'createdAt', 'updatedAt'
+        ])
+        && data.workspaceId == workspaceId
+        && isNonEmptyStr(data.ownerId, 128)
+        && isNonEmptyStr(data.receiptNumber, 40)
+        && isOptStr(data, 'shiftId', 128)
+        && isOptStr(data, 'locationId', 128)
+        && isOptStr(data, 'locationName', 120)
+        && isOptStr(data, 'clientId', 128)
+        && isOptStr(data, 'clientName', 140)
+        && isNonEmptyStr(data.cashierName, 120)
+        && data.paymentMethod in ['cash', 'card']
+        && isNonEmptyStr(data.accountId, 128)
+        && data.lines is list && data.lines.size() >= 1 && data.lines.size() <= 50
+        && data.subtotalCents is int && data.subtotalCents >= 0
+        && data.discountCents is int && data.discountCents >= 0
+        && data.totalCents is int && data.totalCents >= 0
+        && data.costCents is int && data.costCents >= 0
+        && isOptStr(data, 'couponCode', 40)
+        && data.status in ['completed', 'refunded']
+        && isNonEmptyStr(data.occurredAt, 40)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBillingEvent(data, workspaceId) {
+      return data.keys().hasAll([
+          'workspaceId', 'ownerId', 'idempotencyKey', 'plan', 'amountCents',
+          'periodMonths', 'status', 'provider', 'occurredAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'workspaceId', 'ownerId', 'idempotencyKey', 'plan', 'amountCents',
+          'periodMonths', 'status', 'provider', 'occurredAt', 'createdAt', 'updatedAt'
+        ])
+        && data.workspaceId == workspaceId
+        && isNonEmptyStr(data.ownerId, 128)
+        && isNonEmptyStr(data.idempotencyKey, 128)
+        && data.plan == 'pro'
+        && data.amountCents is int && data.amountCents >= 0
+        && data.periodMonths is int && data.periodMonths >= 1 && data.periodMonths <= 24
+        && data.status in ['paid', 'failed']
+        && isNonEmptyStr(data.provider, 60)
+        && isNonEmptyStr(data.occurredAt, 40)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidCoupon(data, workspaceId) {
       return data.keys().hasAll(['workspaceId', 'ownerId', 'code', 'discountType', 'discountValue', 'status', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
@@ -616,10 +782,50 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Top-level Employee Invitations (scoped to owner and exact verified recipient email)
+    match /invitations/{inviteId} {
+      allow get: if isVerified() && isValidId(inviteId) && (
+        existing().ownerId == request.auth.uid
+        || existing().email == request.auth.token.email
+        || isAdmin()
+      );
+      allow list: if isVerified() && (
+        resource.data.ownerId == request.auth.uid
+        || resource.data.email == request.auth.token.email
+        || isAdmin()
+      );
+      allow create: if isVerified() && isValidId(inviteId)
+        && isValidInvitation(incoming())
+        && isWorkspaceOwner(incoming().workspaceId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerified() && isValidId(inviteId)
+        && isValidInvitation(incoming())
+        && incoming().workspaceId == existing().workspaceId
+        && incoming().ownerId == existing().ownerId
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (existing().ownerId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'role', 'allowedRecipeIds', 'locationId', 'updatedAt']))
+          || (existing().status == 'pending'
+            && existing().email == request.auth.token.email
+            && incoming().status == 'accepted'
+            && incoming().acceptedByUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'acceptedByUid', 'updatedAt']))
+          || isAdmin()
+        );
+      allow delete: if isVerified() && isValidId(inviteId) && (existing().ownerId == request.auth.uid || isAdmin());
+    }
+
     match /workspaces/{workspaceId} {
       allow get: if isVerified() && isValidId(workspaceId) && (
         existing().ownerId == request.auth.uid
         || ('memberUids' in existing() && request.auth.uid in existing().memberUids)
+        || isWorkspaceMember(workspaceId)
         || isAdmin()
       );
       allow list: if isVerified() && (
@@ -633,27 +839,51 @@ service cloud.firestore {
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
       allow update: if isVerified() && isValidId(workspaceId)
-        && (existing().ownerId == request.auth.uid || isAdmin())
         && isValidWorkspace(incoming())
         && incoming().ownerId == existing().ownerId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'slogan', 'businessFormat', 'memberUids',
-          'themeIndex', 'density', 'pins', 'hiddenModules', 'demoLoaded', 'updatedAt'
-        ]);
+        && (
+          ((existing().ownerId == request.auth.uid || isAdmin())
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'slogan', 'businessFormat', 'memberUids',
+              'themeIndex', 'density', 'pins', 'hiddenModules', 'demoLoaded',
+              'plan', 'subscriptionStatus', 'trialEndsAt', 'currentPeriodEnd',
+              'graceEndsAt', 'billingEmail', 'lastPaymentId', 'updatedAt'
+            ]))
+          || (incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'updatedAt'])
+            && 'memberUids' in incoming()
+            && request.auth.uid in incoming().memberUids
+            && (!('memberUids' in existing()) || (
+              incoming().memberUids.hasAll(existing().memberUids)
+              && incoming().memberUids.size() <= existing().memberUids.size() + 1
+            ))
+            && getAfter(/databases/$(database)/documents/workspaces/$(workspaceId)/members/$(request.auth.uid)).data.active == true)
+        );
       allow delete: if isVerified() && isValidId(workspaceId) && (existing().ownerId == request.auth.uid || isAdmin());
 
       // Members subcollection
       match /members/{memberId} {
         allow get: if isValidId(memberId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(memberId)
           && isValidMember(incoming(), workspaceId)
-          && isWorkspaceOwner(workspaceId)
           && matchesWorkspaceOwner(workspaceId)
           && incoming().createdAt == request.time
-          && incoming().updatedAt == request.time;
+          && incoming().updatedAt == request.time
+          && (
+            isWorkspaceOwner(workspaceId)
+            || (isVerified()
+              && memberId == request.auth.uid
+              && incoming().uid == request.auth.uid
+              && incoming().role != 'owner'
+              && ('inviteId' in incoming())
+              && exists(/databases/$(database)/documents/invitations/$(incoming().inviteId))
+              && get(/databases/$(database)/documents/invitations/$(incoming().inviteId)).data.workspaceId == workspaceId
+              && get(/databases/$(database)/documents/invitations/$(incoming().inviteId)).data.email == request.auth.token.email
+              && get(/databases/$(database)/documents/invitations/$(incoming().inviteId)).data.status == 'pending'
+              && incoming().role == get(/databases/$(database)/documents/invitations/$(incoming().inviteId)).data.role)
+          );
         allow update: if isValidId(memberId)
           && isValidMember(incoming(), workspaceId)
           && isWorkspaceOwner(workspaceId)
@@ -662,7 +892,8 @@ service cloud.firestore {
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'uid', 'name', 'email', 'role', 'payType', 'rateCents', 'percent', 'active', 'updatedAt'
+            'uid', 'inviteId', 'name', 'email', 'role', 'payType', 'rateCents',
+            'percent', 'allowedRecipeIds', 'locationId', 'active', 'updatedAt'
           ]);
         allow delete: if isValidId(memberId) && isWorkspaceOwner(workspaceId);
       }
@@ -670,7 +901,7 @@ service cloud.firestore {
       // Locations
       match /locations/{locationId} {
         allow get: if isValidId(locationId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(locationId)
           && isValidLocation(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -691,7 +922,7 @@ service cloud.firestore {
       // Recipes
       match /recipes/{recipeId} {
         allow get: if isValidId(recipeId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(recipeId)
           && isValidRecipe(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -718,7 +949,7 @@ service cloud.firestore {
       // Inventory Items
       match /inventoryItems/{itemId} {
         allow get: if isValidId(itemId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(itemId)
           && isValidInventoryItem(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -741,7 +972,7 @@ service cloud.firestore {
       // Stock Lots (FEFO)
       match /stockLots/{lotId} {
         allow get: if isValidId(lotId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(lotId)
           && isValidStockLot(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -764,7 +995,7 @@ service cloud.firestore {
       // Stock Movements (append-only ledger)
       match /stockMovements/{movementId} {
         allow get: if isValidId(movementId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(movementId)
           && isValidStockMovement(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -774,10 +1005,32 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
+      // Stock Transfers (inter-location)
+      match /stockTransfers/{transferId} {
+        allow get: if isValidId(transferId) && hasWorkspaceAccess(workspaceId);
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
+        allow create: if isValidId(transferId)
+          && isValidStockTransfer(incoming(), workspaceId)
+          && hasWorkspaceAccess(workspaceId)
+          && matchesWorkspaceOwner(workspaceId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(transferId)
+          && isValidStockTransfer(incoming(), workspaceId)
+          && hasWorkspaceAccess(workspaceId)
+          && existing().status == 'in_transit'
+          && incoming().workspaceId == existing().workspaceId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'receivedAt', 'note', 'updatedAt']);
+        allow delete: if isValidId(transferId) && isWorkspaceOwner(workspaceId);
+      }
+
       // Suppliers
       match /suppliers/{supplierId} {
         allow get: if isValidId(supplierId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(supplierId)
           && isValidSupplier(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -800,7 +1053,7 @@ service cloud.firestore {
       // Purchases
       match /purchases/{purchaseId} {
         allow get: if isValidId(purchaseId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(purchaseId)
           && isValidPurchase(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -824,7 +1077,7 @@ service cloud.firestore {
       // Clients
       match /clients/{clientId} {
         allow get: if isValidId(clientId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(clientId)
           && isValidClient(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -848,7 +1101,7 @@ service cloud.firestore {
       // Leads
       match /leads/{leadId} {
         allow get: if isValidId(leadId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(leadId)
           && isValidLead(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -873,7 +1126,7 @@ service cloud.firestore {
       // Orders
       match /orders/{orderId} {
         allow get: if isValidId(orderId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(orderId)
           && isValidOrder(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -899,7 +1152,7 @@ service cloud.firestore {
       // WorkItems
       match /workItems/{workItemId} {
         allow get: if isValidId(workItemId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(workItemId)
           && isValidWorkItem(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -922,7 +1175,7 @@ service cloud.firestore {
       // ProductionRuns
       match /productionRuns/{runId} {
         allow get: if isValidId(runId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(runId)
           && isValidProductionRun(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -946,7 +1199,7 @@ service cloud.firestore {
       // Accounts
       match /accounts/{accountId} {
         allow get: if isValidId(accountId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(accountId)
           && isValidAccount(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -967,7 +1220,7 @@ service cloud.firestore {
       // MoneyTransactions (append-only financial ledger)
       match /transactions/{txId} {
         allow get: if isValidId(txId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(txId)
           && isValidTransaction(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -980,7 +1233,7 @@ service cloud.firestore {
       // RecurringPayments
       match /recurringPayments/{rpId} {
         allow get: if isValidId(rpId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(rpId)
           && isValidRecurringPayment(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -1000,10 +1253,73 @@ service cloud.firestore {
         allow delete: if isValidId(rpId) && isWorkspaceOwner(workspaceId);
       }
 
+      // CashShifts (POS shifts with terminal locking on closed)
+      match /cashShifts/{shiftId} {
+        allow get: if isValidId(shiftId) && hasWorkspaceAccess(workspaceId);
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
+        allow create: if isValidId(shiftId)
+          && isValidCashShift(incoming(), workspaceId)
+          && hasWorkspaceAccess(workspaceId)
+          && matchesWorkspaceOwner(workspaceId)
+          && incoming().status == 'open'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(shiftId)
+          && isValidCashShift(incoming(), workspaceId)
+          && hasWorkspaceAccess(workspaceId)
+          && existing().status != 'closed'
+          && incoming().workspaceId == existing().workspaceId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'cashSalesCents', 'cardSalesCents', 'refundsCents', 'cashInCents', 'cashOutCents',
+            'salesCount', 'closedAt', 'closingActualCashCents', 'closingDiscrepancyCents',
+            'status', 'updatedAt'
+          ]);
+        allow delete: if isValidId(shiftId) && isWorkspaceOwner(workspaceId);
+      }
+
+      // PosSales (POS receipts with terminal locking on refunded)
+      match /posSales/{saleId} {
+        allow get: if isValidId(saleId) && hasWorkspaceAccess(workspaceId);
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
+        allow create: if isValidId(saleId)
+          && isValidPosSale(incoming(), workspaceId)
+          && hasWorkspaceAccess(workspaceId)
+          && matchesWorkspaceOwner(workspaceId)
+          && incoming().status == 'completed'
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(saleId)
+          && isValidPosSale(incoming(), workspaceId)
+          && hasWorkspaceAccess(workspaceId)
+          && existing().status != 'refunded'
+          && incoming().workspaceId == existing().workspaceId
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+        allow delete: if isValidId(saleId) && isWorkspaceOwner(workspaceId);
+      }
+
+      // BillingEvents (owner-only, append-only)
+      match /billingEvents/{eventId} {
+        allow get: if isValidId(eventId) && (isWorkspaceOwner(workspaceId) || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow create: if isValidId(eventId)
+          && isValidBillingEvent(incoming(), workspaceId)
+          && (isWorkspaceOwner(workspaceId) || isAdmin())
+          && matchesWorkspaceOwner(workspaceId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update, delete: if false;
+      }
+
       // Coupons (terminal state locking on redeemed)
       match /coupons/{couponId} {
         allow get: if isValidId(couponId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(couponId)
           && isValidCoupon(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -1025,7 +1341,7 @@ service cloud.firestore {
       // Complaints
       match /complaints/{complaintId} {
         allow get: if isValidId(complaintId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(complaintId)
           && isValidComplaint(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -1048,7 +1364,7 @@ service cloud.firestore {
       // ContentPosts
       match /contentPosts/{postId} {
         allow get: if isValidId(postId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(postId)
           && isValidContentPost(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)
@@ -1071,7 +1387,7 @@ service cloud.firestore {
       // PayrollPeriods
       match /payrollPeriods/{periodId} {
         allow get: if isValidId(periodId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(periodId)
           && isValidPayrollPeriod(incoming(), workspaceId)
           && isWorkspaceOwner(workspaceId)
@@ -1094,7 +1410,7 @@ service cloud.firestore {
       // TimeEntries
       match /timeEntries/{entryId} {
         allow get: if isValidId(entryId) && hasWorkspaceAccess(workspaceId);
-        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || isAdmin());
+        allow list: if isVerified() && (resource.data.ownerId == request.auth.uid || hasWorkspaceAccess(workspaceId));
         allow create: if isValidId(entryId)
           && isValidTimeEntry(incoming(), workspaceId)
           && hasWorkspaceAccess(workspaceId)

@@ -496,7 +496,7 @@ export function WorkHubPage({
             </div>
 
             {/* Weekday Header */}
-            <div className="grid grid-cols-7 gap-1.5 text-center text-xs font-medium text-[var(--muted)] pt-1">
+            <div className="grid grid-cols-7 gap-1 sm:gap-1.5 text-center text-xs font-medium text-[var(--muted)] pt-1">
               {WEEKDAYS_RU.map((wd) => (
                 <div key={wd} className="py-1">
                   {wd}
@@ -505,10 +505,10 @@ export function WorkHubPage({
             </div>
 
             {/* Day Grid */}
-            <div className="grid grid-cols-7 gap-1.5">
+            <div className="grid grid-cols-7 gap-1 sm:gap-1.5">
               {monthData.cells.map((cell) => {
                 if (!cell.iso || cell.day === null) {
-                  return <div key={cell.key} className="min-h-[68px] sm:min-h-[78px]" />;
+                  return <div key={cell.key} className="min-h-[58px] sm:min-h-[78px]" />;
                 }
 
                 const iso = cell.iso;
@@ -524,7 +524,7 @@ export function WorkHubPage({
                     key={iso}
                     type="button"
                     onClick={() => setSelectedDate(iso)}
-                    className={`min-h-[68px] sm:min-h-[78px] p-2 rounded-xl border text-left flex flex-col justify-between transition-colors ${
+                    className={`min-h-[58px] sm:min-h-[78px] p-1 sm:p-2 rounded-lg sm:rounded-xl border text-left flex flex-col justify-between transition-colors ${
                       isSelected
                         ? 'bg-[var(--accent)] text-[var(--accent-ink)] border-[var(--accent)]'
                         : isToday

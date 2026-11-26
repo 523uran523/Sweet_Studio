@@ -92,6 +92,17 @@ describe('payrollEngine', () => {
         priceCents: 500000,
         paidCents: 500000,
         costCents: 180000,
+        items: [
+          {
+            id: 'item_o1',
+            recipeId: 'rec1',
+            recipeTitle: 'Медовик',
+            qty: 1,
+            weightGrams: 1500,
+            priceCents: 500000,
+            costCents: 180000,
+          },
+        ],
         assigneeName: 'Борис',
       },
       {
@@ -106,6 +117,17 @@ describe('payrollEngine', () => {
         priceCents: 200000,
         paidCents: 0,
         costCents: 80000,
+        items: [
+          {
+            id: 'item_o2',
+            recipeId: 'rec2',
+            recipeTitle: 'Капкейки',
+            qty: 1,
+            weightGrams: 800,
+            priceCents: 200000,
+            costCents: 80000,
+          },
+        ],
         assigneeName: 'Вера',
       },
     ];

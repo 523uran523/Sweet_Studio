@@ -8,6 +8,8 @@ import {
 } from '../components/UiPrimitives';
 import { centsToRubInput, formatMoneyCents, parseRubToCents } from '../core/moneyFormat';
 import { convertQtyWithDensity } from '../core/units';
+import { doc, writeBatch } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from '../firebase/client';
 import {
   consumeInventoryFefo,
   convertLeadToOrder,
@@ -21,7 +23,7 @@ import {
   updateWorkspaceEntity,
   WorkspaceSnapshot,
 } from '../firebase/workspaceService';
-import { Lead, Order, OrderStatus, Workspace } from '../types/domain';
+import { Lead, Order, OrderItem, OrderStatus, Workspace } from '../types/domain';
 import { exportOrderPdf } from '../utils/pdfExporter';
 import {
   clearFormDraft,
@@ -35,9 +37,6 @@ interface OrderFormDraftData {
   newTitle: string;
   newClientId: string;
   newClient: string;
-  newRecipeId: string;
-  newWeight: number;
-  newPriceRub: string;
   newDue: string;
   newDeliveryAddress: string;
   newAllergens: string;
@@ -107,9 +106,7 @@ export function OrdersPage({
   const [newTitle, setNewTitle] = useState('');
   const [newClientId, setNewClientId] = useState('');
   const [newClient, setNewClient] = useState('');
-  const [newRecipeId, setNewRecipeId] = useState('');
-  const [newWeight, setNewWeight] = useState(2000);
-  const [newPriceRub, setNewPriceRub] = useState('4500');
+  const [orderItems, setOrderItems] = useState<OrderItem[]>([]);
   const [newDue, setNewDue] = useState(
     new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10),
   );
@@ -124,9 +121,7 @@ export function OrdersPage({
     setNewTitle('');
     setNewClientId('');
     setNewClient('');
-    setNewRecipeId('');
-    setNewWeight(2000);
-    setNewPriceRub('4500');
+    setOrderItems([]);
     setNewDue(new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10));
     setNewDeliveryAddress('');
     setNewAllergens('');
@@ -145,9 +140,6 @@ export function OrdersPage({
       setNewTitle(d.newTitle || '');
       setNewClientId(d.newClientId || '');
       setNewClient(d.newClient || '');
-      setNewRecipeId(d.newRecipeId || '');
-      setNewWeight(d.newWeight || 2000);
-      setNewPriceRub(d.newPriceRub || '4500');
       if (d.newDue) setNewDue(d.newDue);
       setNewDeliveryAddress(d.newDeliveryAddress || '');
       setNewAllergens(d.newAllergens || '');
@@ -165,7 +157,6 @@ export function OrdersPage({
     const hasContent = Boolean(
       newTitle.trim() ||
         newClient.trim() ||
-        newRecipeId ||
         newDeliveryAddress.trim() ||
         newAllergens.trim() ||
         newCouponId ||
@@ -177,9 +168,6 @@ export function OrdersPage({
         newTitle,
         newClientId,
         newClient,
-        newRecipeId,
-        newWeight,
-        newPriceRub,
         newDue,
         newDeliveryAddress,
         newAllergens,
@@ -195,9 +183,6 @@ export function OrdersPage({
     newTitle,
     newClientId,
     newClient,
-    newRecipeId,
-    newWeight,
-    newPriceRub,
     newDue,
     newDeliveryAddress,
     newAllergens,
@@ -229,17 +214,19 @@ export function OrdersPage({
     [data.coupons, todayIso],
   );
 
-  const selectedRecipe = useMemo(
-    () => data.recipes.find((r) => r.id === newRecipeId),
-    [data.recipes, newRecipeId],
-  );
-
   const selectedCoupon = useMemo(
     () => activeCoupons.find((c) => c.id === newCouponId),
     [activeCoupons, newCouponId],
   );
 
-  const basePriceCents = parseRubToCents(newPriceRub);
+  const basePriceCents = useMemo(
+    () => orderItems.reduce((sum, item) => sum + item.priceCents * item.qty, 0),
+    [orderItems],
+  );
+  const baseCostCents = useMemo(
+    () => orderItems.reduce((sum, item) => sum + item.costCents * item.qty, 0),
+    [orderItems],
+  );
   const couponEligible = Boolean(
     selectedCoupon &&
       (!selectedCoupon.minOrderCents || basePriceCents >= selectedCoupon.minOrderCents) &&
@@ -255,15 +242,6 @@ export function OrdersPage({
   }, [selectedCoupon, couponEligible, basePriceCents]);
 
   const finalPriceCents = Math.max(0, basePriceCents - discountCents);
-  const scaledCostCents = useMemo(() => {
-    if (selectedRecipe && selectedRecipe.yieldGrams > 0) {
-      return Math.max(
-        0,
-        Math.round((selectedRecipe.costCents * newWeight) / selectedRecipe.yieldGrams),
-      );
-    }
-    return Math.round(finalPriceCents * 0.52);
-  }, [selectedRecipe, newWeight, finalPriceCents]);
 
   const mergeAllergens = (a?: string, b?: string[]) => {
     const parts = [
@@ -279,29 +257,45 @@ export function OrdersPage({
     if (!client) return;
     setNewClient(client.name);
     if (client.address) setNewDeliveryAddress(client.address);
-    setNewAllergens(mergeAllergens(client.allergens, selectedRecipe?.allergens));
+    const recipeAllergens = orderItems.flatMap((item) => {
+      const rec = data.recipes.find((r) => r.id === item.recipeId);
+      return rec?.allergens || [];
+    });
+    setNewAllergens(mergeAllergens(client.allergens, recipeAllergens));
   };
 
-  const handleSelectRecipe = (rid: string) => {
-    setNewRecipeId(rid);
+  const addOrderItemFromRecipe = (rid: string) => {
     const r = data.recipes.find((x) => x.id === rid);
     if (!r) return;
-    if (!newTitle) setNewTitle(r.title);
-    setNewWeight(r.yieldGrams);
-    setNewPriceRub(String(Math.round(r.recommendedPriceCents / 100)));
+    const item: OrderItem = {
+      id: newId('item'),
+      recipeId: r.id,
+      recipeTitle: r.title,
+      qty: 1,
+      weightGrams: r.yieldGrams || 1000,
+      priceCents: r.recommendedPriceCents,
+      costCents: r.costCents,
+    };
+    setOrderItems((prev) => [...prev, item]);
+    if (!newTitle.trim()) setNewTitle(r.title);
     const selectedClientObj = data.clients.find((c) => c.id === newClientId);
     setNewAllergens(mergeAllergens(selectedClientObj?.allergens, r.allergens));
   };
 
-  const handleWeightChange = (nextGrams: number) => {
-    const safeGrams = Math.max(100, nextGrams || 100);
-    setNewWeight(safeGrams);
-    if (selectedRecipe && selectedRecipe.yieldGrams > 0) {
-      const scaledPriceCents = Math.round(
-        (selectedRecipe.recommendedPriceCents * safeGrams) / selectedRecipe.yieldGrams,
-      );
-      setNewPriceRub(String(Math.round(scaledPriceCents / 100)));
-    }
+  const updateOrderItem = (itemId: string, patch: Partial<OrderItem>) => {
+    setOrderItems((prev) =>
+      prev.map((item) => {
+        if (item.id !== itemId) return item;
+        const next = { ...item, ...patch };
+        const rec = data.recipes.find((r) => r.id === next.recipeId);
+        if (rec && rec.yieldGrams > 0 && patch.weightGrams !== undefined) {
+          const scale = next.weightGrams / rec.yieldGrams;
+          next.priceCents = Math.round(rec.recommendedPriceCents * scale);
+          next.costCents = Math.round(rec.costCents * scale);
+        }
+        return next;
+      }),
+    );
   };
 
   const handleCreateOrder = async (e: React.FormEvent) => {
@@ -312,7 +306,10 @@ export function OrdersPage({
       return;
     }
 
-    const rec = selectedRecipe;
+    if (orderItems.length === 0) {
+      onToast('Добавьте хотя бы одну позицию');
+      return;
+    }
     const orderNumber = `№${106 + data.orders.length}`;
     const orderId = newId('ord');
 
@@ -358,11 +355,10 @@ export function OrdersPage({
       title: newTitle.trim().slice(0, 160),
       clientId: resolvedClientId,
       clientName: trimmedClient,
-      recipeId: rec?.id || '',
-      recipeTitle: rec?.title || '',
-      weightGrams: newWeight,
+      items: orderItems,
+      weightGrams: orderItems.reduce((sum, item) => sum + item.weightGrams * item.qty, 0),
       priceCents: finalPriceCents,
-      costCents: scaledCostCents,
+      costCents: baseCostCents,
       prepaymentCents: Math.round(finalPriceCents * 0.5),
       paidCents: 0,
       status: 'confirmed',
@@ -381,8 +377,11 @@ export function OrdersPage({
       payload.couponCode = selectedCoupon.code.slice(0, 40);
     }
 
-    await createWorkspaceEntity(workspace, 'orders', orderId, payload);
-    await createWorkspaceEntity(workspace, 'workItems', newId('wi'), {
+    const tx = writeBatch(db);
+    tx.set(doc(db, 'workspaces', workspace.id, 'orders', orderId), payload);
+
+    // Create work item
+    tx.set(doc(db, 'workspaces', workspace.id, 'workItems', newId('wi')), {
       type: 'order',
       sourceId: orderId,
       title: `${orderNumber} · ${newTitle.trim().slice(0, 120)}`,
@@ -394,18 +393,24 @@ export function OrdersPage({
       tags: ['заказ'],
     });
 
+    // if (newLeadId) {
+    //   await convertLeadToOrder(workspace.id, newLeadId, orderId);
+    // }
+
     if (selectedCoupon && couponEligible && discountCents > 0) {
-      await updateWorkspaceEntity(workspace, 'coupons', selectedCoupon.id, {
+      tx.update(doc(db, 'workspaces', workspace.id, 'coupons', selectedCoupon.id), {
         status: 'redeemed',
         redeemedOrderId: orderId,
       });
     }
 
+    await tx.commit();
+
     clearFormDraft(orderDraftKey(workspace.id));
     setOrderDraftSavedAt(null);
     resetNewOrderForm();
     setCreateOpen(false);
-    onToast(`Заказ ${orderNumber} создан`);
+    onToast(`Заказ #${orderNumber} создан`);
   };
 
   const handlePay = async (e: React.FormEvent) => {
@@ -1210,53 +1215,90 @@ export function OrdersPage({
             </label>
           </div>
 
-          <label className="block space-y-1 text-sm font-medium">
-            <span>Рецепт (снимок + пересчёт веса)</span>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm font-medium">Позиции заказа</span>
+              <span className="text-xs text-[var(--muted)] tabular-nums">
+                {formatMoneyCents(finalPriceCents, hideAmounts)}
+              </span>
+            </div>
+            {orderItems.length === 0 && (
+              <div className="text-xs text-[var(--muted)] px-1">
+                Добавьте торт, капкейки или несколько изделий в один заказ.
+              </div>
+            )}
+            {orderItems.map((item) => (
+              <div
+                key={item.id}
+                className="grid grid-cols-1 sm:grid-cols-[1fr_88px_88px_auto] gap-2 p-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              >
+                <div className="text-sm">
+                  <div className="font-medium">{item.recipeTitle}</div>
+                  <div className="text-xs text-[var(--muted)] tabular-nums">
+                    {formatMoneyCents(item.priceCents, hideAmounts)} за шт
+                  </div>
+                </div>
+                <label className="block space-y-0.5 text-xs font-medium">
+                  <span>Кол-во</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={item.qty}
+                    onChange={(e) =>
+                      updateOrderItem(item.id, { qty: Math.max(1, Number(e.target.value) || 1) })
+                    }
+                    className="w-full min-h-[40px] px-2 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm tabular-nums"
+                  />
+                </label>
+                <label className="block space-y-0.5 text-xs font-medium">
+                  <span>Вес, г</span>
+                  <input
+                    type="number"
+                    min={50}
+                    value={item.weightGrams}
+                    onChange={(e) =>
+                      updateOrderItem(item.id, {
+                        weightGrams: Math.max(50, Number(e.target.value) || 50),
+                      })
+                    }
+                    className="w-full min-h-[40px] px-2 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm tabular-nums"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setOrderItems((prev) => prev.filter((row) => row.id !== item.id))}
+                  className="self-end min-h-[40px] px-2.5 rounded-lg border border-[var(--line)] text-[var(--danger)]"
+                  aria-label="Удалить позицию"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
             <select
-              value={newRecipeId}
-              onChange={(e) => handleSelectRecipe(e.target.value)}
-              className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              value=""
+              onChange={(e) => {
+                if (e.target.value) addOrderItemFromRecipe(e.target.value);
+              }}
+              className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm"
             >
-              <option value="">Без привязки к рецепту</option>
+              <option value="">+ Добавить рецепт</option>
               {data.recipes.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.title} ({r.yieldGrams} г)
                 </option>
               ))}
             </select>
-          </label>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-            <label className="block space-y-1 text-sm font-medium">
-              <span>Вес, г</span>
-              <input
-                type="number"
-                min={100}
-                value={newWeight}
-                onChange={(e) => handleWeightChange(Number(e.target.value))}
-                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] tabular-nums"
-              />
-            </label>
-            <label className="block space-y-1 text-sm font-medium">
-              <span>Цена до скидки, ₽</span>
-              <input
-                type="text"
-                required
-                value={newPriceRub}
-                onChange={(e) => setNewPriceRub(e.target.value)}
-                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] tabular-nums"
-              />
-            </label>
-            <label className="block space-y-1 text-sm font-medium">
-              <span>Выдача</span>
-              <input
-                type="date"
-                value={newDue}
-                onChange={(e) => setNewDue(e.target.value)}
-                className="w-full min-h-[44px] px-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
-              />
-            </label>
           </div>
+
+          <label className="block space-y-1 text-sm font-medium">
+            <span>Выдача</span>
+            <input
+              type="date"
+              value={newDue}
+              onChange={(e) => setNewDue(e.target.value)}
+              className="w-full min-h-[44px] px-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+            />
+          </label>
 
           <label className="block space-y-1 text-sm font-medium">
             <span>Купон / промокод</span>
@@ -1304,7 +1346,7 @@ export function OrdersPage({
             <div>
               <div className="text-[var(--muted)]">План. себестоимость</div>
               <div className="font-semibold">
-                {formatMoneyCents(scaledCostCents, hideAmounts)}
+                {formatMoneyCents(baseCostCents, hideAmounts)}
               </div>
             </div>
           </div>

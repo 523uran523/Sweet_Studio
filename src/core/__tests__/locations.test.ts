@@ -81,6 +81,17 @@ describe('locations filtering & breakdown', () => {
         priceCents: 300000,
         costCents: 120000,
         paidCents: 300000,
+        items: [
+          {
+            id: 'item_o1',
+            recipeId: 'rec1',
+            recipeTitle: 'Медовик',
+            qty: 1,
+            weightGrams: 1500,
+            priceCents: 300000,
+            costCents: 120000,
+          },
+        ],
         status: 'delivered',
         locationName: 'Кухня-цех',
       },

@@ -361,6 +361,16 @@ export type OrderStatus =
   | 'closed'
   | 'cancelled';
 
+export interface OrderItem {
+  id: string;
+  recipeId: string;
+  recipeTitle: string;
+  qty: number;
+  weightGrams: number;
+  priceCents: number;
+  costCents: number;
+}
+
 export interface Order {
   id: string;
   workspaceId: string;
@@ -369,11 +379,7 @@ export interface Order {
   title: string;
   clientId?: string;
   clientName: string;
-  recipeId?: string;
-  recipeTitle?: string;
-  weightGrams?: number;
-  priceCents: number;
-  costCents: number;
+  items: OrderItem[];
   prepaymentCents?: number;
   paidCents: number;
   discountCents?: number;
@@ -387,6 +393,12 @@ export interface Order {
   allergens?: string;
   stockDeducted?: boolean;
   favorite?: boolean;
+  // Backward compatibility getters / optional helpers
+  recipeId?: string;
+  recipeTitle?: string;
+  weightGrams?: number;
+  priceCents: number;
+  costCents: number;
 }
 
 export type WorkItemType =

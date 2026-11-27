@@ -12,6 +12,7 @@
 
 - **[`Sweet_Studio_TZ.md`](./Sweet_Studio_TZ.md)** — полное техническое задание (карта переноса из Masters, ролевая модель, дизайн-система Soft Atelier, функциональные требования и сценарии приёмки `T01–T20`).
 - **[`Sweet_Studio_Personal_Addendum.md`](./Sweet_Studio_Personal_Addendum.md)** — спецификация будущей автономной редакции **Personal** (локальный SQLite без сети, десктоп/мобильные пакеты, оффлайн-лицензия, мастер миграции `Personal → Cloud`).
+- **[`Sweet_Studio_Android_TZ.md`](./Sweet_Studio_Android_TZ.md)** — отдельное ТЗ Android Personal: один пользователь, локальные данные и работа без интернета, этапы и приёмка.
 - **[`Sweet_Studio_Наброски.md`](./Sweet_Studio_Наброски.md)** — ранние заметки и черновые идеи к проектированию.
 - **[`Sweet_Studio_reference.html`](./Sweet_Studio_reference.html)** — визуальный HTML-референс палитр и компоновки **Soft Atelier**.
 - **`Sweet_Studio.ico` / `Sweet_Studio_icon.png`** — исходники иконки приложения (ягодный фон `#A45C7A`, кремовый десерт `#FFF6ED`).

@@ -379,7 +379,7 @@ export interface Order {
   title: string;
   clientId?: string;
   clientName: string;
-  items: OrderItem[];
+  items?: OrderItem[];
   prepaymentCents?: number;
   paidCents: number;
   discountCents?: number;
@@ -410,6 +410,8 @@ export type WorkItemType =
   | 'purchase'
   | 'finance';
 
+export type WorkRecurrence = 'none' | 'daily' | 'weekly' | 'biweekly' | 'monthly';
+
 export interface WorkItem {
   id: string;
   workspaceId: string;
@@ -423,6 +425,9 @@ export interface WorkItem {
   priority: 'low' | 'normal' | 'high';
   stage: 'queue' | 'in_progress' | 'done';
   tags?: string[];
+  recurrence?: WorkRecurrence;
+  seriesId?: string;
+  occurrenceIndex?: number;
 }
 
 export interface ProductionRun {

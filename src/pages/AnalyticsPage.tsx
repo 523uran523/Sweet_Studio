@@ -13,6 +13,7 @@ import {
   resolveLocationName,
 } from '../core/locations';
 import { formatMoneyCents } from '../core/moneyFormat';
+import { attributeOrderToRecipes } from '../core/ordersCore';
 import { WorkspaceSnapshot } from '../firebase/workspaceService';
 
 type PeriodFilter = '30d' | '90d' | 'all';
@@ -144,26 +145,21 @@ export function AnalyticsPage({
       }
     >();
     for (const o of activeOrCompleted) {
-      if (!o.recipeTitle && !o.recipeId) continue;
-      const rec = data.recipes.find((r) => r.id === o.recipeId);
-      const key = o.recipeId || o.recipeTitle || 'other';
-      const title = rec?.title || o.recipeTitle || 'Рецепт';
-      const prev = recipeStatsMap.get(key) || {
-        title,
-        ordersCount: 0,
-        revenueCents: 0,
-        costCents: 0,
-        laborHoursTotal: 0,
-      };
-      prev.ordersCount += 1;
-      prev.revenueCents += o.priceCents;
-      prev.costCents += o.costCents;
-      const scale =
-        rec && rec.yieldGrams > 0 && o.weightGrams
-          ? o.weightGrams / rec.yieldGrams
-          : 1;
-      prev.laborHoursTotal += (rec?.laborHours ?? 1.5) * scale;
-      recipeStatsMap.set(key, prev);
+      const attributions = attributeOrderToRecipes(o, data.recipes);
+      for (const attr of attributions) {
+        const prev = recipeStatsMap.get(attr.key) || {
+          title: attr.title,
+          ordersCount: 0,
+          revenueCents: 0,
+          costCents: 0,
+          laborHoursTotal: 0,
+        };
+        prev.ordersCount += attr.ordersCount;
+        prev.revenueCents += attr.revenueCents;
+        prev.costCents += attr.costCents;
+        prev.laborHoursTotal += attr.laborHoursTotal;
+        recipeStatsMap.set(attr.key, prev);
+      }
     }
     for (const sale of posSalesInPeriod) {
       const ratio = sale.subtotalCents > 0 ? sale.totalCents / sale.subtotalCents : 1;

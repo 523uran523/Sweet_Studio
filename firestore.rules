@@ -439,6 +439,25 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidOrderItem(item) {
+      return item is map
+        && item.keys().hasAll(['id', 'recipeId', 'recipeTitle', 'qty', 'weightGrams', 'priceCents', 'costCents'])
+        && item.keys().hasOnly(['id', 'recipeId', 'recipeTitle', 'qty', 'weightGrams', 'priceCents', 'costCents'])
+        && isNonEmptyStr(item.id, 128)
+        && item.recipeId is string && item.recipeId.size() <= 128
+        && isNonEmptyStr(item.recipeTitle, 160)
+        && item.qty is number && item.qty > 0
+        && item.weightGrams is number && item.weightGrams >= 0
+        && item.priceCents is int && item.priceCents >= 0
+        && item.costCents is int && item.costCents >= 0;
+    }
+
+    function isValidOrderItemsList(items) {
+      return items is list
+        && items.size() <= 50
+        && (items.size() == 0 || isValidOrderItem(items[0]));
+    }
+
     function isValidOrder(data, workspaceId) {
       return data.keys().hasAll([
           'workspaceId', 'ownerId', 'orderNumber', 'title', 'clientName',
@@ -446,7 +465,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'workspaceId', 'ownerId', 'orderNumber', 'title', 'clientId', 'clientName',
-          'recipeId', 'recipeTitle', 'weightGrams', 'priceCents', 'costCents',
+          'items', 'recipeId', 'recipeTitle', 'weightGrams', 'priceCents', 'costCents',
           'prepaymentCents', 'paidCents', 'discountCents', 'couponCode', 'status',
           'dueDate', 'assigneeName', 'locationName', 'deliveryAddress', 'wishes',
           'allergens', 'stockDeducted', 'favorite', 'createdAt', 'updatedAt'
@@ -457,6 +476,7 @@ service cloud.firestore {
         && isNonEmptyStr(data.title, 160)
         && isOptStr(data, 'clientId', 128)
         && isNonEmptyStr(data.clientName, 140)
+        && (!('items' in data) || isValidOrderItemsList(data.items))
         && isOptStr(data, 'recipeId', 128)
         && isOptStr(data, 'recipeTitle', 140)
         && isOptNum(data, 'weightGrams')
@@ -483,7 +503,8 @@ service cloud.firestore {
       return data.keys().hasAll(['workspaceId', 'ownerId', 'type', 'title', 'stage', 'priority', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'workspaceId', 'ownerId', 'type', 'sourceId', 'title', 'assigneeName',
-          'locationName', 'dueDate', 'priority', 'stage', 'tags', 'createdAt', 'updatedAt'
+          'locationName', 'dueDate', 'priority', 'stage', 'tags',
+          'recurrence', 'seriesId', 'occurrenceIndex', 'createdAt', 'updatedAt'
         ])
         && data.workspaceId == workspaceId
         && isNonEmptyStr(data.ownerId, 128)
@@ -496,6 +517,9 @@ service cloud.firestore {
         && data.priority in ['low', 'normal', 'high']
         && data.stage in ['queue', 'in_progress', 'done']
         && (!('tags' in data) || isValidStrList(data.tags, 10, 40))
+        && (!('recurrence' in data) || data.recurrence in ['none', 'daily', 'weekly', 'biweekly', 'monthly'])
+        && isOptStr(data, 'seriesId', 128)
+        && isOptInt(data, 'occurrenceIndex')
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -1141,7 +1165,7 @@ service cloud.firestore {
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'title', 'clientId', 'clientName', 'recipeId', 'recipeTitle', 'weightGrams',
+            'title', 'clientId', 'clientName', 'items', 'recipeId', 'recipeTitle', 'weightGrams',
             'priceCents', 'costCents', 'prepaymentCents', 'paidCents', 'discountCents',
             'couponCode', 'status', 'dueDate', 'assigneeName', 'locationName',
             'deliveryAddress', 'wishes', 'allergens', 'stockDeducted', 'favorite', 'updatedAt'
@@ -1167,7 +1191,8 @@ service cloud.firestore {
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
-            'title', 'assigneeName', 'locationName', 'dueDate', 'priority', 'stage', 'tags', 'updatedAt'
+            'title', 'assigneeName', 'locationName', 'dueDate', 'priority', 'stage', 'tags',
+            'recurrence', 'seriesId', 'occurrenceIndex', 'updatedAt'
           ]);
         allow delete: if isValidId(workItemId) && hasWorkspaceAccess(workspaceId);
       }

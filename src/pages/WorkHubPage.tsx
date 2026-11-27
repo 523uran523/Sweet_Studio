@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Megaphone,
   Plus,
+  Repeat,
   ShieldCheck,
   ShoppingBasket,
   Trash2,
@@ -21,6 +22,8 @@ import {
   SegmentedTabs,
 } from '../components/UiPrimitives';
 import { formatMoneyCents } from '../core/moneyFormat';
+import { summarizeOrderItems } from '../core/ordersCore';
+import { planNextRecurringWorkItem, RECURRENCE_LABELS_RU } from '../core/workRecurrence';
 import {
   createWorkspaceEntity,
   deleteWorkspaceEntity,
@@ -33,6 +36,7 @@ import {
   OrderStatus,
   WorkItem,
   WorkItemType,
+  WorkRecurrence,
   Workspace,
 } from '../types/domain';
 
@@ -154,6 +158,7 @@ export function WorkHubPage({
   const [editPriority, setEditPriority] = useState<WorkItem['priority']>('normal');
   const [editDueDate, setEditDueDate] = useState(todayIso);
   const [editAssignee, setEditAssignee] = useState('Владелец');
+  const [editRecurrence, setEditRecurrence] = useState<WorkRecurrence>('none');
 
   // Month calendar state
   const [calendarMonth, setCalendarMonth] = useState(() => {
@@ -167,6 +172,7 @@ export function WorkHubPage({
   const [priority, setPriority] = useState<WorkItem['priority']>('normal');
   const [dueDate, setDueDate] = useState(todayIso);
   const [assignee, setAssignee] = useState('Владелец');
+  const [recurrence, setRecurrence] = useState<WorkRecurrence>('none');
 
   const isOverdue = (w: WorkItem) =>
     Boolean(w.dueDate && w.dueDate < todayIso && w.stage !== 'done');
@@ -192,10 +198,57 @@ export function WorkHubPage({
     [data.workItems, typeFilter, preset, todayIso],
   );
 
+  const applyUpdateAndSpawnRecurrence = async (
+    item: WorkItem,
+    nextStage: WorkItem['stage'],
+    patchOverrides: Record<string, unknown>,
+  ): Promise<string | null> => {
+    const nextRecurrence = (patchOverrides.recurrence as WorkRecurrence | undefined) ?? item.recurrence ?? 'none';
+    const nextDue = (patchOverrides.dueDate as string | undefined) ?? item.dueDate;
+    const candidateItem: WorkItem = {
+      ...item,
+      stage: nextStage,
+      dueDate: nextDue,
+      recurrence: nextRecurrence,
+      title: typeof patchOverrides.title === 'string' ? patchOverrides.title : item.title,
+      priority: (patchOverrides.priority as WorkItem['priority'] | undefined) ?? item.priority,
+      assigneeName:
+        typeof patchOverrides.assigneeName === 'string'
+          ? patchOverrides.assigneeName
+          : item.assigneeName,
+    };
+
+    const plan =
+      item.stage !== 'done' && nextStage === 'done'
+        ? planNextRecurringWorkItem(candidateItem, data.workItems, todayIso)
+        : null;
+
+    const finalPatch: Record<string, unknown> = {
+      ...patchOverrides,
+      stage: nextStage,
+    };
+    if (plan) {
+      finalPatch.seriesId = plan.seriesId;
+      finalPatch.occurrenceIndex = plan.currentIndex;
+    }
+
+    await updateWorkspaceEntity(workspace, 'workItems', item.id, finalPatch);
+
+    if (plan) {
+      await createWorkspaceEntity(workspace, 'workItems', newId('wi'), plan.nextPayload);
+      return plan.nextDueDate;
+    }
+    return null;
+  };
+
   const handleStageChange = async (item: WorkItem, nextStage: WorkItem['stage']) => {
     if (item.stage === nextStage) return;
-    await updateWorkspaceEntity(workspace, 'workItems', item.id, { stage: nextStage });
-    onToast(`Статус обновлён: ${STAGES.find((s) => s.id === nextStage)?.label}`);
+    const spawnedDate = await applyUpdateAndSpawnRecurrence(item, nextStage, {});
+    if (spawnedDate) {
+      onToast(`Выполнено · создана следующая задача на ${spawnedDate}`);
+    } else {
+      onToast(`Статус обновлён: ${STAGES.find((s) => s.id === nextStage)?.label}`);
+    }
   };
 
   const handleOrderStatusChange = async (orderId: string, nextStatus: OrderStatus) => {
@@ -206,6 +259,7 @@ export function WorkHubPage({
 
   const openNewTaskForDate = (targetDate: string) => {
     setDueDate(targetDate);
+    setRecurrence('none');
     setDrawerOpen(true);
   };
 
@@ -216,20 +270,30 @@ export function WorkHubPage({
     setEditPriority(item.priority);
     setEditDueDate(item.dueDate || todayIso);
     setEditAssignee(item.assigneeName || 'Владелец');
+    setEditRecurrence(item.recurrence || 'none');
   };
 
   const handleSaveEditTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingItem || !editTitle.trim()) return;
-    await updateWorkspaceEntity(workspace, 'workItems', editingItem.id, {
+    const patch: Record<string, unknown> = {
       title: editTitle.trim().slice(0, 160),
-      stage: editStage,
       priority: editPriority,
       dueDate: editDueDate,
       assigneeName: editAssignee.trim().slice(0, 120) || 'Владелец',
-    });
+      recurrence: editRecurrence,
+    };
+    if (editRecurrence !== 'none') {
+      patch.seriesId = editingItem.seriesId || editingItem.id;
+      patch.occurrenceIndex = editingItem.occurrenceIndex ?? 1;
+    }
+    const spawnedDate = await applyUpdateAndSpawnRecurrence(editingItem, editStage, patch);
     setEditingItem(null);
-    onToast('Задача обновлена');
+    onToast(
+      spawnedDate
+        ? `Задача обновлена · создан повтор на ${spawnedDate}`
+        : 'Задача обновлена',
+    );
   };
 
   const handleDeleteTask = async () => {
@@ -242,7 +306,7 @@ export function WorkHubPage({
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    await createWorkspaceEntity(workspace, 'workItems', newId('wi'), {
+    const payload: Record<string, unknown> = {
       type,
       title: title.trim().slice(0, 160),
       assigneeName: assignee.trim().slice(0, 120) || 'Владелец',
@@ -251,10 +315,21 @@ export function WorkHubPage({
       priority,
       stage: 'queue',
       tags: [],
-    });
+      recurrence,
+    };
+    if (recurrence !== 'none') {
+      payload.seriesId = newId('ser');
+      payload.occurrenceIndex = 1;
+    }
+    await createWorkspaceEntity(workspace, 'workItems', newId('wi'), payload);
     setTitle('');
+    setRecurrence('none');
     setDrawerOpen(false);
-    onToast('Задача добавлена в Работу');
+    onToast(
+      recurrence !== 'none'
+        ? `Повторяющаяся задача добавлена (${RECURRENCE_LABELS_RU[recurrence]})`
+        : 'Задача добавлена в Работу',
+    );
   };
 
   const monthData = useMemo(() => {
@@ -670,8 +745,12 @@ export function WorkHubPage({
                               {ord.orderNumber} · {ord.title}
                             </div>
                             <div className="text-xs text-[var(--muted)] mt-0.5">
-                              {ord.clientName}
-                              {ord.weightGrams ? ` · ${ord.weightGrams} г` : ''}
+                              {(() => {
+                                const summary = summarizeOrderItems(ord);
+                                return summary.summaryText
+                                  ? `${ord.clientName} · ${summary.summaryText}`
+                                  : ord.clientName;
+                              })()}
                             </div>
                           </div>
                           <div className="text-right tabular-nums shrink-0">
@@ -753,6 +832,15 @@ export function WorkHubPage({
                                 <Icon className="w-3 h-3" />
                               </span>
                               <span>{meta.label}</span>
+                              {item.recurrence && item.recurrence !== 'none' && (
+                                <span
+                                  title={RECURRENCE_LABELS_RU[item.recurrence]}
+                                  className="inline-flex items-center gap-0.5 text-[11px] font-medium text-[var(--accent)]"
+                                >
+                                  <Repeat className="w-3 h-3" />
+                                  <span>{RECURRENCE_LABELS_RU[item.recurrence]}</span>
+                                </span>
+                              )}
                             </span>
                             <span className="text-xs text-[var(--muted)] truncate">
                               {item.assigneeName || 'Владелец'}
@@ -879,6 +967,15 @@ export function WorkHubPage({
                               <Icon className="w-3 h-3" />
                             </span>
                             <span>{meta.label}</span>
+                            {item.recurrence && item.recurrence !== 'none' && (
+                              <span
+                                title={RECURRENCE_LABELS_RU[item.recurrence]}
+                                className="inline-flex items-center gap-0.5 text-[11px] font-medium text-[var(--accent)]"
+                              >
+                                <Repeat className="w-3 h-3" />
+                                <span>{RECURRENCE_LABELS_RU[item.recurrence]}</span>
+                              </span>
+                            )}
                             {item.priority === 'high' && (
                               <span className="text-[11px] font-semibold text-[var(--danger)]">
                                 · Важно
@@ -974,7 +1071,18 @@ export function WorkHubPage({
                           {meta.label}
                         </span>
                       </td>
-                      <td className="px-4 py-3 font-medium">{item.title}</td>
+                      <td className="px-4 py-3 font-medium">
+                        <div>{item.title}</div>
+                        {item.recurrence && item.recurrence !== 'none' && (
+                          <div className="inline-flex items-center gap-1 text-[11px] text-[var(--accent)] mt-0.5">
+                            <Repeat className="w-3 h-3" />
+                            <span>
+                              {RECURRENCE_LABELS_RU[item.recurrence]}
+                              {item.occurrenceIndex ? ` · #${item.occurrenceIndex}` : ''}
+                            </span>
+                          </div>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-[var(--muted)]">
                         {item.assigneeName || '—'}
                       </td>
@@ -1081,6 +1189,25 @@ export function WorkHubPage({
               </select>
             </label>
           </div>
+          <label className="block space-y-1 text-sm font-medium">
+            <span>Повтор задачи</span>
+            <select
+              value={recurrence}
+              onChange={(e) => setRecurrence(e.target.value as WorkRecurrence)}
+              className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+            >
+              {(Object.keys(RECURRENCE_LABELS_RU) as WorkRecurrence[]).map((r) => (
+                <option key={r} value={r}>
+                  {RECURRENCE_LABELS_RU[r]}
+                </option>
+              ))}
+            </select>
+            {recurrence !== 'none' && (
+              <span className="block text-xs text-[var(--muted)] font-normal">
+                При переводе в «Готово» следующая задача создастся автоматически.
+              </span>
+            )}
+          </label>
           <button
             type="submit"
             className="w-full min-h-[46px] rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-sm font-medium"
@@ -1163,6 +1290,27 @@ export function WorkHubPage({
                 </select>
               </label>
             </div>
+
+            <label className="block space-y-1 text-sm font-medium">
+              <span>Повтор задачи</span>
+              <select
+                value={editRecurrence}
+                onChange={(e) => setEditRecurrence(e.target.value as WorkRecurrence)}
+                className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+              >
+                {(Object.keys(RECURRENCE_LABELS_RU) as WorkRecurrence[]).map((r) => (
+                  <option key={r} value={r}>
+                    {RECURRENCE_LABELS_RU[r]}
+                  </option>
+                ))}
+              </select>
+              {editRecurrence !== 'none' && (
+                <span className="block text-xs text-[var(--muted)] font-normal">
+                  При завершении («Готово») создаётся следующий повтор серии
+                  {editingItem.occurrenceIndex ? ` (#${editingItem.occurrenceIndex + 1})` : ''}.
+                </span>
+              )}
+            </label>
 
             {editingItem.type === 'order' && editingItem.sourceId && onOpenOrder && (
               <button

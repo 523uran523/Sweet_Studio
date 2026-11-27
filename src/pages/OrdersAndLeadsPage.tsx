@@ -7,8 +7,14 @@ import {
   PageHeader,
 } from '../components/UiPrimitives';
 import { centsToRubInput, formatMoneyCents, parseRubToCents } from '../core/moneyFormat';
+import {
+  buildOrderSummaryTitle,
+  computeOrderItemsTotals,
+  getOrderItemsNormalized,
+  summarizeOrderItems,
+} from '../core/ordersCore';
 import { convertQtyWithDensity } from '../core/units';
-import { doc, writeBatch } from 'firebase/firestore';
+import { doc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase/client';
 import {
   consumeInventoryFefo,
@@ -42,6 +48,7 @@ interface OrderFormDraftData {
   newAllergens: string;
   newCouponId: string;
   newWishes: string;
+  orderItems?: OrderItem[];
 }
 
 const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
@@ -83,6 +90,7 @@ export function OrdersPage({
   // Edit order form fields
   const [editTitle, setEditTitle] = useState('');
   const [editClientName, setEditClientName] = useState('');
+  const [editItems, setEditItems] = useState<OrderItem[]>([]);
   const [editWeight, setEditWeight] = useState(1500);
   const [editPriceRub, setEditPriceRub] = useState('');
   const [editDue, setEditDue] = useState('');
@@ -145,6 +153,7 @@ export function OrdersPage({
       setNewAllergens(d.newAllergens || '');
       setNewCouponId(d.newCouponId || '');
       setNewWishes(d.newWishes || '');
+      if (Array.isArray(d.orderItems)) setOrderItems(d.orderItems);
       setOrderDraftSavedAt(saved.savedAt);
     } else {
       setOrderDraftSavedAt(null);
@@ -160,7 +169,8 @@ export function OrdersPage({
         newDeliveryAddress.trim() ||
         newAllergens.trim() ||
         newCouponId ||
-        newWishes.trim(),
+        newWishes.trim() ||
+        orderItems.length > 0,
     );
     if (!hasContent) return;
     const timer = window.setTimeout(() => {
@@ -173,6 +183,7 @@ export function OrdersPage({
         newAllergens,
         newCouponId,
         newWishes,
+        orderItems,
       });
       if (stored) setOrderDraftSavedAt(stored.savedAt);
     }, 450);
@@ -188,6 +199,7 @@ export function OrdersPage({
     newAllergens,
     newCouponId,
     newWishes,
+    orderItems,
   ]);
 
   const filtered = useMemo(() => {
@@ -270,16 +282,38 @@ export function OrdersPage({
     const item: OrderItem = {
       id: newId('item'),
       recipeId: r.id,
-      recipeTitle: r.title,
+      recipeTitle: r.title.slice(0, 160),
       qty: 1,
       weightGrams: r.yieldGrams || 1000,
       priceCents: r.recommendedPriceCents,
       costCents: r.costCents,
     };
-    setOrderItems((prev) => [...prev, item]);
-    if (!newTitle.trim()) setNewTitle(r.title);
+    const nextItems = [...orderItems, item];
+    setOrderItems(nextItems);
+    if (!newTitle.trim() || newTitle === buildOrderSummaryTitle(orderItems)) {
+      setNewTitle(buildOrderSummaryTitle(nextItems));
+    }
     const selectedClientObj = data.clients.find((c) => c.id === newClientId);
-    setNewAllergens(mergeAllergens(selectedClientObj?.allergens, r.allergens));
+    setNewAllergens((prev) =>
+      mergeAllergens(mergeAllergens(prev, selectedClientObj?.allergens ? [selectedClientObj.allergens] : []), r.allergens),
+    );
+  };
+
+  const addCustomOrderItem = () => {
+    const item: OrderItem = {
+      id: newId('item'),
+      recipeId: '',
+      recipeTitle: 'Авторское изделие',
+      qty: 1,
+      weightGrams: 1000,
+      priceCents: 250000,
+      costCents: 120000,
+    };
+    const nextItems = [...orderItems, item];
+    setOrderItems(nextItems);
+    if (!newTitle.trim() || newTitle === buildOrderSummaryTitle(orderItems)) {
+      setNewTitle(buildOrderSummaryTitle(nextItems));
+    }
   };
 
   const updateOrderItem = (itemId: string, patch: Partial<OrderItem>) => {
@@ -287,8 +321,8 @@ export function OrdersPage({
       prev.map((item) => {
         if (item.id !== itemId) return item;
         const next = { ...item, ...patch };
-        const rec = data.recipes.find((r) => r.id === next.recipeId);
-        if (rec && rec.yieldGrams > 0 && patch.weightGrams !== undefined) {
+        const rec = next.recipeId ? data.recipes.find((r) => r.id === next.recipeId) : undefined;
+        if (rec && rec.yieldGrams > 0 && patch.weightGrams !== undefined && patch.priceCents === undefined) {
           const scale = next.weightGrams / rec.yieldGrams;
           next.priceCents = Math.round(rec.recommendedPriceCents * scale);
           next.costCents = Math.round(rec.costCents * scale);
@@ -300,18 +334,30 @@ export function OrdersPage({
 
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTitle.trim() || !newClient.trim()) return;
+    if (!newClient.trim()) return;
+    if (orderItems.length === 0) {
+      onToast('Добавьте хотя бы одну позицию в заказ');
+      return;
+    }
+    const resolvedTitle = (newTitle.trim() || buildOrderSummaryTitle(orderItems)).slice(0, 160);
+    if (!resolvedTitle) return;
     if (selectedCoupon && !couponEligible) {
       onToast('Купон не подходит к выбранному клиенту или сумме заказа');
       return;
     }
 
-    if (orderItems.length === 0) {
-      onToast('Добавьте хотя бы одну позицию');
-      return;
-    }
     const orderNumber = `№${106 + data.orders.length}`;
     const orderId = newId('ord');
+    const cleanItems: OrderItem[] = orderItems.map((item) => ({
+      id: item.id || newId('item'),
+      recipeId: (item.recipeId || '').slice(0, 128),
+      recipeTitle: (item.recipeTitle || 'Позиция').trim().slice(0, 160),
+      qty: Math.max(1, Number(item.qty) || 1),
+      weightGrams: Math.max(0, Number(item.weightGrams) || 0),
+      priceCents: Math.max(0, Math.round(item.priceCents || 0)),
+      costCents: Math.max(0, Math.round(item.costCents || 0)),
+    }));
+    const { totalWeightGrams } = computeOrderItemsTotals(cleanItems);
 
     let resolvedClientId = newClientId;
     const trimmedClient = newClient.trim().slice(0, 140);
@@ -350,13 +396,18 @@ export function OrdersPage({
       }
     }
 
+    const now = serverTimestamp();
     const payload: Record<string, unknown> = {
+      workspaceId: workspace.id,
+      ownerId: workspace.ownerId,
       orderNumber,
-      title: newTitle.trim().slice(0, 160),
+      title: resolvedTitle,
       clientId: resolvedClientId,
       clientName: trimmedClient,
-      items: orderItems,
-      weightGrams: orderItems.reduce((sum, item) => sum + item.weightGrams * item.qty, 0),
+      items: cleanItems,
+      recipeId: cleanItems[0]?.recipeId || '',
+      recipeTitle: buildOrderSummaryTitle(cleanItems).slice(0, 140),
+      weightGrams: totalWeightGrams,
       priceCents: finalPriceCents,
       costCents: baseCostCents,
       prepaymentCents: Math.round(finalPriceCents * 0.5),
@@ -368,6 +419,8 @@ export function OrdersPage({
       wishes: newWishes.trim().slice(0, 400),
       allergens: newAllergens.trim().slice(0, 240),
       favorite: false,
+      createdAt: now,
+      updatedAt: now,
     };
     if (newDeliveryAddress.trim()) {
       payload.deliveryAddress = newDeliveryAddress.trim().slice(0, 240);
@@ -380,37 +433,42 @@ export function OrdersPage({
     const tx = writeBatch(db);
     tx.set(doc(db, 'workspaces', workspace.id, 'orders', orderId), payload);
 
-    // Create work item
     tx.set(doc(db, 'workspaces', workspace.id, 'workItems', newId('wi')), {
+      workspaceId: workspace.id,
+      ownerId: workspace.ownerId,
       type: 'order',
       sourceId: orderId,
-      title: `${orderNumber} · ${newTitle.trim().slice(0, 120)}`,
+      title: `${orderNumber} · ${resolvedTitle.slice(0, 120)}`,
       assigneeName: 'Владелец',
       locationName: data.locations[0]?.name || 'Основная студия',
       dueDate: newDue,
       priority: 'normal',
       stage: 'queue',
       tags: ['заказ'],
+      createdAt: now,
+      updatedAt: now,
     });
-
-    // if (newLeadId) {
-    //   await convertLeadToOrder(workspace.id, newLeadId, orderId);
-    // }
 
     if (selectedCoupon && couponEligible && discountCents > 0) {
       tx.update(doc(db, 'workspaces', workspace.id, 'coupons', selectedCoupon.id), {
         status: 'redeemed',
         redeemedOrderId: orderId,
+        updatedAt: now,
       });
     }
 
-    await tx.commit();
+    try {
+      await tx.commit();
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `workspaces/${workspace.id}/orders/${orderId}`);
+      return;
+    }
 
     clearFormDraft(orderDraftKey(workspace.id));
     setOrderDraftSavedAt(null);
     resetNewOrderForm();
     setCreateOpen(false);
-    onToast(`Заказ #${orderNumber} создан`);
+    onToast(`Заказ ${orderNumber} создан`);
   };
 
   const handlePay = async (e: React.FormEvent) => {
@@ -462,9 +520,12 @@ export function OrdersPage({
   }, [activeOrder, data.clients]);
 
   const startEditOrder = (ord: Order) => {
+    const items = getOrderItemsNormalized(ord);
     setEditTitle(ord.title);
     setEditClientName(ord.clientName);
-    setEditWeight(ord.weightGrams || 1500);
+    setEditItems(items);
+    const { totalWeightGrams } = computeOrderItemsTotals(items);
+    setEditWeight(ord.weightGrams || totalWeightGrams || 1500);
     setEditPriceRub(centsToRubInput(ord.priceCents));
     setEditDue(ord.dueDate || '');
     setEditAddress(ord.deliveryAddress || '');
@@ -473,15 +534,38 @@ export function OrdersPage({
     setEditMode(true);
   };
 
+  const syncEditTotalsFromItems = (nextItems: OrderItem[]) => {
+    setEditItems(nextItems);
+    const { totalWeightGrams, basePriceCents } = computeOrderItemsTotals(nextItems);
+    const discount = activeOrder?.discountCents || 0;
+    setEditWeight(totalWeightGrams);
+    setEditPriceRub(centsToRubInput(Math.max(0, basePriceCents - discount)));
+  };
+
   const handleSaveEditOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeOrder || !editTitle.trim() || !editClientName.trim()) return;
     const priceCents = parseRubToCents(editPriceRub);
+    const cleanItems: OrderItem[] = editItems.map((item) => ({
+      id: item.id || newId('item'),
+      recipeId: (item.recipeId || '').slice(0, 128),
+      recipeTitle: (item.recipeTitle || 'Позиция').trim().slice(0, 160),
+      qty: Math.max(1, Number(item.qty) || 1),
+      weightGrams: Math.max(0, Number(item.weightGrams) || 0),
+      priceCents: Math.max(0, Math.round(item.priceCents || 0)),
+      costCents: Math.max(0, Math.round(item.costCents || 0)),
+    }));
+    const { totalWeightGrams, baseCostCents: computedCostCents } =
+      computeOrderItemsTotals(cleanItems);
     await updateWorkspaceEntity(workspace, 'orders', activeOrder.id, {
       title: editTitle.trim().slice(0, 160),
       clientName: editClientName.trim().slice(0, 140),
-      weightGrams: Math.max(50, Number(editWeight) || 1000),
+      items: cleanItems,
+      recipeId: cleanItems[0]?.recipeId || '',
+      recipeTitle: buildOrderSummaryTitle(cleanItems).slice(0, 140),
+      weightGrams: Math.max(50, Number(editWeight) || totalWeightGrams || 1000),
       priceCents,
+      costCents: cleanItems.length > 0 ? computedCostCents : activeOrder.costCents,
       dueDate: editDue,
       deliveryAddress: editAddress.trim().slice(0, 240),
       wishes: editWishes.trim().slice(0, 400),
@@ -502,42 +586,59 @@ export function OrdersPage({
   };
 
   const handleDeductOrderStock = async (ord: Order) => {
-    const rec = data.recipes.find((r) => r.id === ord.recipeId);
-    if (!rec || !rec.ingredients || rec.ingredients.length === 0) {
-      onToast('У заказа нет рецепта с составом ингредиентов');
+    const normalizedItems = getOrderItemsNormalized(ord);
+    const itemsWithRecipes = normalizedItems
+      .map((item) => ({
+        item,
+        recipe: item.recipeId
+          ? data.recipes.find((r) => r.id === item.recipeId)
+          : undefined,
+      }))
+      .filter((x) => x.recipe && x.recipe.ingredients && x.recipe.ingredients.length > 0);
+
+    if (itemsWithRecipes.length === 0) {
+      onToast('У позиций заказа нет рецептов с составом ингредиентов');
       return;
     }
-    const scale =
-      rec.yieldGrams > 0 && ord.weightGrams ? ord.weightGrams / rec.yieldGrams : 1;
+
     let workingLots = data.stockLots;
     let actualCost = 0;
     let deductedCount = 0;
     try {
-      for (const ing of rec.ingredients) {
-        const inv =
-          (ing.itemId ? data.inventoryItems.find((i) => i.id === ing.itemId) : undefined) ||
-          data.inventoryItems.find(
-            (i) => i.name.trim().toLowerCase() === ing.name.trim().toLowerCase(),
+      for (const { item, recipe } of itemsWithRecipes) {
+        const rec = recipe!;
+        const unitScale =
+          rec.yieldGrams > 0 && item.weightGrams > 0
+            ? item.weightGrams / rec.yieldGrams
+            : 1;
+        const totalScale = unitScale * Math.max(1, item.qty || 1);
+
+        for (const ing of rec.ingredients || []) {
+          const inv =
+            (ing.itemId ? data.inventoryItems.find((i) => i.id === ing.itemId) : undefined) ||
+            data.inventoryItems.find(
+              (i) => i.name.trim().toLowerCase() === ing.name.trim().toLowerCase(),
+            );
+          if (!inv) continue;
+          const neededInRecipeUnit = ing.qty * totalScale;
+          const converted = convertQtyWithDensity(
+            neededInRecipeUnit,
+            ing.unit,
+            inv.unit,
+            inv.density,
           );
-        if (!inv) continue;
-        const neededInRecipeUnit = ing.qty * scale;
-        const converted = convertQtyWithDensity(
-          neededInRecipeUnit,
-          ing.unit,
-          inv.unit,
-          inv.density,
-        );
-        const qtyInInvUnit = converted !== null ? converted : neededInRecipeUnit;
-        const res = await consumeInventoryFefo({
-          workspace,
-          item: inv,
-          lots: workingLots,
-          qtyToConsume: Math.round(qtyInInvUnit * 1000) / 1000,
-          reason: `Списание на заказ ${ord.orderNumber} (${ord.title})`,
-        });
-        workingLots = res.updatedLots;
-        actualCost += res.totalCostCents;
-        deductedCount += 1;
+          const qtyInInvUnit = converted !== null ? converted : neededInRecipeUnit;
+          const res = await consumeInventoryFefo({
+            workspace,
+            item: inv,
+            lots: workingLots,
+            qtyToConsume: Math.round(qtyInInvUnit * 1000) / 1000,
+            reason: `Списание на заказ ${ord.orderNumber} (${item.recipeTitle})`,
+          });
+          workingLots = res.updatedLots;
+          actualCost += res.totalCostCents;
+          deductedCount += 1;
+        }
       }
       if (deductedCount === 0) {
         onToast('Ни один ингредиент рецепта не привязан к кладовой');
@@ -554,16 +655,30 @@ export function OrdersPage({
   };
 
   const handleRepeatOrder = async (src: Order) => {
-    const rec = data.recipes.find((r) => r.id === src.recipeId);
-    const weight = src.weightGrams || rec?.yieldGrams || 2000;
-    const priceCents =
-      rec && rec.yieldGrams > 0
-        ? Math.round((rec.recommendedPriceCents * weight) / rec.yieldGrams)
-        : src.priceCents;
-    const costCents =
-      rec && rec.yieldGrams > 0
-        ? Math.round((rec.costCents * weight) / rec.yieldGrams)
-        : src.costCents;
+    const repeatedItems: OrderItem[] = getOrderItemsNormalized(src).map((item) => {
+      const rec = item.recipeId
+        ? data.recipes.find((r) => r.id === item.recipeId)
+        : undefined;
+      const weight = item.weightGrams || rec?.yieldGrams || 1000;
+      const unitPriceCents =
+        rec && rec.yieldGrams > 0
+          ? Math.round((rec.recommendedPriceCents * weight) / rec.yieldGrams)
+          : item.priceCents;
+      const unitCostCents =
+        rec && rec.yieldGrams > 0
+          ? Math.round((rec.costCents * weight) / rec.yieldGrams)
+          : item.costCents;
+      return {
+        id: newId('item'),
+        recipeId: rec?.id || item.recipeId || '',
+        recipeTitle: (rec?.title || item.recipeTitle).slice(0, 160),
+        qty: Math.max(1, item.qty || 1),
+        weightGrams: weight,
+        priceCents: unitPriceCents,
+        costCents: unitCostCents,
+      };
+    });
+    const totals = computeOrderItemsTotals(repeatedItems);
     const orderNumber = `№${106 + data.orders.length}`;
     const orderId = newId('ord');
     const dueDate = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
@@ -572,12 +687,13 @@ export function OrdersPage({
       orderNumber,
       title: src.title.slice(0, 160),
       clientName: src.clientName.slice(0, 140),
-      recipeId: rec?.id || src.recipeId || '',
-      recipeTitle: rec?.title || src.recipeTitle || '',
-      weightGrams: weight,
-      priceCents,
-      costCents,
-      prepaymentCents: Math.round(priceCents * 0.5),
+      items: repeatedItems,
+      recipeId: repeatedItems[0]?.recipeId || src.recipeId || '',
+      recipeTitle: buildOrderSummaryTitle(repeatedItems).slice(0, 140),
+      weightGrams: totals.totalWeightGrams,
+      priceCents: totals.basePriceCents,
+      costCents: totals.baseCostCents,
+      prepaymentCents: Math.round(totals.basePriceCents * 0.5),
       paidCents: 0,
       status: 'confirmed',
       dueDate,
@@ -690,12 +806,12 @@ export function OrdersPage({
                           {ord.orderNumber} · {ord.title}
                         </span>
                       </div>
-                      {ord.recipeTitle && (
-                        <div className="text-xs text-[var(--muted)]">
-                          {ord.recipeTitle}
-                          {ord.weightGrams ? ` · ${ord.weightGrams} г` : ''}
-                        </div>
-                      )}
+                      {(() => {
+                        const summary = summarizeOrderItems(ord);
+                        return summary.summaryText ? (
+                          <div className="text-xs text-[var(--muted)]">{summary.summaryText}</div>
+                        ) : null;
+                      })()}
                     </td>
                     <td className="px-4 py-3.5 text-[var(--muted)]">
                       {ord.clientName}
@@ -774,9 +890,164 @@ export function OrdersPage({
                     />
                   </label>
                 </div>
+                <div className="space-y-2">
+                  <div className="text-xs font-medium">Позиции заказа</div>
+                  {editItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className="p-2.5 rounded-xl border border-[var(--line)] bg-[var(--card)] space-y-2"
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={item.recipeTitle}
+                          onChange={(e) =>
+                            syncEditTotalsFromItems(
+                              editItems.map((row) =>
+                                row.id === item.id
+                                  ? { ...row, recipeTitle: e.target.value }
+                                  : row,
+                              ),
+                            )
+                          }
+                          className="flex-1 min-h-[36px] px-2.5 rounded-lg border border-[var(--line)] bg-[var(--bg)] text-xs font-medium"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            syncEditTotalsFromItems(
+                              editItems.filter((row) => row.id !== item.id),
+                            )
+                          }
+                          className="min-h-[36px] px-2 rounded-lg border border-[var(--line)] text-[var(--danger)]"
+                          aria-label="Удалить позицию"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-[11px]">
+                        <label className="space-y-0.5">
+                          <span className="text-[var(--muted)]">Кол-во</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={item.qty}
+                            onChange={(e) =>
+                              syncEditTotalsFromItems(
+                                editItems.map((row) =>
+                                  row.id === item.id
+                                    ? { ...row, qty: Math.max(1, Number(e.target.value) || 1) }
+                                    : row,
+                                ),
+                              )
+                            }
+                            className="w-full min-h-[34px] px-2 rounded-lg border border-[var(--line)] bg-[var(--bg)] tabular-nums"
+                          />
+                        </label>
+                        <label className="space-y-0.5">
+                          <span className="text-[var(--muted)]">Вес, г</span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={item.weightGrams}
+                            onChange={(e) => {
+                              const nextWeight = Math.max(0, Number(e.target.value) || 0);
+                              const rec = item.recipeId
+                                ? data.recipes.find((r) => r.id === item.recipeId)
+                                : undefined;
+                              syncEditTotalsFromItems(
+                                editItems.map((row) => {
+                                  if (row.id !== item.id) return row;
+                                  if (rec && rec.yieldGrams > 0) {
+                                    const sc = nextWeight / rec.yieldGrams;
+                                    return {
+                                      ...row,
+                                      weightGrams: nextWeight,
+                                      priceCents: Math.round(rec.recommendedPriceCents * sc),
+                                      costCents: Math.round(rec.costCents * sc),
+                                    };
+                                  }
+                                  return { ...row, weightGrams: nextWeight };
+                                }),
+                              );
+                            }}
+                            className="w-full min-h-[34px] px-2 rounded-lg border border-[var(--line)] bg-[var(--bg)] tabular-nums"
+                          />
+                        </label>
+                        <label className="space-y-0.5">
+                          <span className="text-[var(--muted)]">Цена/шт, ₽</span>
+                          <input
+                            type="text"
+                            value={centsToRubInput(item.priceCents)}
+                            onChange={(e) => {
+                              const unitCents = parseRubToCents(e.target.value);
+                              syncEditTotalsFromItems(
+                                editItems.map((row) =>
+                                  row.id === item.id
+                                    ? { ...row, priceCents: unitCents }
+                                    : row,
+                                ),
+                              );
+                            }}
+                            className="w-full min-h-[34px] px-2 rounded-lg border border-[var(--line)] bg-[var(--bg)] tabular-nums"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="flex flex-wrap gap-2">
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        const r = data.recipes.find((x) => x.id === e.target.value);
+                        if (!r) return;
+                        syncEditTotalsFromItems([
+                          ...editItems,
+                          {
+                            id: newId('item'),
+                            recipeId: r.id,
+                            recipeTitle: r.title.slice(0, 160),
+                            qty: 1,
+                            weightGrams: r.yieldGrams || 1000,
+                            priceCents: r.recommendedPriceCents,
+                            costCents: r.costCents,
+                          },
+                        ]);
+                      }}
+                      className="flex-1 min-h-[36px] px-2.5 rounded-lg border border-[var(--line)] bg-[var(--card)] text-xs"
+                    >
+                      <option value="">+ Добавить рецепт</option>
+                      {data.recipes.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.title} ({r.yieldGrams} г)
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        syncEditTotalsFromItems([
+                          ...editItems,
+                          {
+                            id: newId('item'),
+                            recipeId: '',
+                            recipeTitle: 'Доп. позиция',
+                            qty: 1,
+                            weightGrams: 500,
+                            priceCents: 100000,
+                            costCents: 50000,
+                          },
+                        ])
+                      }
+                      className="min-h-[36px] px-3 rounded-lg border border-[var(--line)] bg-[var(--card)] hover:bg-[var(--soft)] text-xs font-medium"
+                    >
+                      + Своя позиция
+                    </button>
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <label className="block space-y-1 text-xs font-medium">
-                    <span>Вес, г</span>
+                    <span>Итоговый вес, г</span>
                     <input
                       type="number"
                       min={50}
@@ -786,7 +1057,7 @@ export function OrdersPage({
                     />
                   </label>
                   <label className="block space-y-1 text-xs font-medium">
-                    <span>Цена, ₽</span>
+                    <span>Итоговая цена, ₽</span>
                     <input
                       type="text"
                       required
@@ -869,6 +1140,38 @@ export function OrdersPage({
                     <div>{formatMoneyCents(activeOrder.costCents, hideAmounts)}</div>
                   </div>
                 </div>
+
+                {(() => {
+                  const detailItems = getOrderItemsNormalized(activeOrder);
+                  return (
+                    <div className="p-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] space-y-2">
+                      <div className="text-xs font-semibold text-[var(--muted)]">
+                        Состав заказа ({detailItems.length})
+                      </div>
+                      <div className="divide-y divide-[var(--line)] text-sm">
+                        {detailItems.map((it) => (
+                          <div
+                            key={it.id}
+                            className="py-2 flex items-center justify-between gap-2 tabular-nums"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-medium truncate">
+                                {it.recipeTitle}
+                                {it.qty > 1 ? ` × ${it.qty} шт` : ''}
+                              </div>
+                              <div className="text-xs text-[var(--muted)]">
+                                {it.weightGrams > 0 ? `${it.weightGrams * it.qty} г` : 'Вес не указан'}
+                              </div>
+                            </div>
+                            <div className="font-semibold shrink-0">
+                              {formatMoneyCents(it.priceCents * it.qty, hideAmounts)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <label className="block space-y-1 text-sm font-medium">
                   <span>Статус заказа</span>
@@ -1055,7 +1358,13 @@ export function OrdersPage({
                 <Pencil className="w-3.5 h-3.5" />
                 <span>Редактировать</span>
               </button>
-              {activeOrder.recipeId && !activeOrder.stockDeducted && (
+              {!activeOrder.stockDeducted &&
+                getOrderItemsNormalized(activeOrder).some((it) => {
+                  const rec = it.recipeId
+                    ? data.recipes.find((r) => r.id === it.recipeId)
+                    : undefined;
+                  return Boolean(rec && rec.ingredients && rec.ingredients.length > 0);
+                }) && (
                 <button
                   type="button"
                   onClick={() => handleDeductOrderStock(activeOrder)}
@@ -1230,64 +1539,97 @@ export function OrdersPage({
             {orderItems.map((item) => (
               <div
                 key={item.id}
-                className="grid grid-cols-1 sm:grid-cols-[1fr_88px_88px_auto] gap-2 p-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)]"
+                className="p-2.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] space-y-2"
               >
-                <div className="text-sm">
-                  <div className="font-medium">{item.recipeTitle}</div>
-                  <div className="text-xs text-[var(--muted)] tabular-nums">
-                    {formatMoneyCents(item.priceCents, hideAmounts)} за шт
-                  </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    required
+                    value={item.recipeTitle}
+                    onChange={(e) =>
+                      updateOrderItem(item.id, { recipeTitle: e.target.value })
+                    }
+                    className="flex-1 min-h-[38px] px-2.5 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm font-medium"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOrderItems((prev) => prev.filter((row) => row.id !== item.id))
+                    }
+                    className="min-h-[38px] px-2.5 rounded-lg border border-[var(--line)] text-[var(--danger)]"
+                    aria-label="Удалить позицию"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
-                <label className="block space-y-0.5 text-xs font-medium">
-                  <span>Кол-во</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={item.qty}
-                    onChange={(e) =>
-                      updateOrderItem(item.id, { qty: Math.max(1, Number(e.target.value) || 1) })
-                    }
-                    className="w-full min-h-[40px] px-2 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm tabular-nums"
-                  />
-                </label>
-                <label className="block space-y-0.5 text-xs font-medium">
-                  <span>Вес, г</span>
-                  <input
-                    type="number"
-                    min={50}
-                    value={item.weightGrams}
-                    onChange={(e) =>
-                      updateOrderItem(item.id, {
-                        weightGrams: Math.max(50, Number(e.target.value) || 50),
-                      })
-                    }
-                    className="w-full min-h-[40px] px-2 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm tabular-nums"
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => setOrderItems((prev) => prev.filter((row) => row.id !== item.id))}
-                  className="self-end min-h-[40px] px-2.5 rounded-lg border border-[var(--line)] text-[var(--danger)]"
-                  aria-label="Удалить позицию"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="grid grid-cols-3 gap-2">
+                  <label className="block space-y-0.5 text-xs font-medium">
+                    <span className="text-[var(--muted)]">Кол-во</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={item.qty}
+                      onChange={(e) =>
+                        updateOrderItem(item.id, {
+                          qty: Math.max(1, Number(e.target.value) || 1),
+                        })
+                      }
+                      className="w-full min-h-[38px] px-2 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm tabular-nums"
+                    />
+                  </label>
+                  <label className="block space-y-0.5 text-xs font-medium">
+                    <span className="text-[var(--muted)]">Вес, г</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={item.weightGrams}
+                      onChange={(e) =>
+                        updateOrderItem(item.id, {
+                          weightGrams: Math.max(0, Number(e.target.value) || 0),
+                        })
+                      }
+                      className="w-full min-h-[38px] px-2 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm tabular-nums"
+                    />
+                  </label>
+                  <label className="block space-y-0.5 text-xs font-medium">
+                    <span className="text-[var(--muted)]">Цена/шт, ₽</span>
+                    <input
+                      type="text"
+                      value={centsToRubInput(item.priceCents)}
+                      onChange={(e) =>
+                        updateOrderItem(item.id, {
+                          priceCents: parseRubToCents(e.target.value),
+                        })
+                      }
+                      className="w-full min-h-[38px] px-2 rounded-lg border border-[var(--line)] bg-[var(--card)] text-sm tabular-nums"
+                    />
+                  </label>
+                </div>
               </div>
             ))}
-            <select
-              value=""
-              onChange={(e) => {
-                if (e.target.value) addOrderItemFromRecipe(e.target.value);
-              }}
-              className="w-full min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm"
-            >
-              <option value="">+ Добавить рецепт</option>
-              {data.recipes.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.title} ({r.yieldGrams} г)
-                </option>
-              ))}
-            </select>
+            <div className="flex flex-wrap gap-2">
+              <select
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) addOrderItemFromRecipe(e.target.value);
+                }}
+                className="flex-1 min-h-[44px] px-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] text-sm"
+              >
+                <option value="">+ Добавить из рецептов</option>
+                {data.recipes.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.title} ({r.yieldGrams} г · {formatMoneyCents(r.recommendedPriceCents, hideAmounts)})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={addCustomOrderItem}
+                className="min-h-[44px] px-3.5 rounded-xl border border-[var(--line)] bg-[var(--bg)] hover:bg-[var(--soft)] text-xs font-medium whitespace-nowrap"
+              >
+                + Своя позиция
+              </button>
+            </div>
           </div>
 
           <label className="block space-y-1 text-sm font-medium">

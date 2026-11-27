@@ -9,7 +9,22 @@ import {
   User,
   verifyBeforeUpdateEmail,
 } from 'firebase/auth';
-import { CreditCard, Download, KeyRound, Mail, RotateCcw, ShieldCheck, Smartphone, Trash2, Upload, UserPlus } from 'lucide-react';
+import {
+  Bell,
+  Copy,
+  CreditCard,
+  Download,
+  FileDown,
+  KeyRound,
+  Mail,
+  RotateCcw,
+  Send,
+  ShieldCheck,
+  Smartphone,
+  Trash2,
+  Upload,
+  UserPlus,
+} from 'lucide-react';
 import { translateFirebaseAuthError } from '../components/AuthOnboarding';
 import { PWAInstallButton, useOnlineStatus, usePWAInstall } from '../components/PwaControls';
 import {
@@ -20,8 +35,17 @@ import {
 } from '../components/UiPrimitives';
 import { netCashTotals } from '../core/calculatorCore';
 import { centsToRubInput, formatMoneyCents, parseRubToCents } from '../core/moneyFormat';
+import {
+  buildTelegramShareUrl,
+  buildWorkspaceAlerts,
+  formatTelegramDigestText,
+  NotificationPrefs,
+  readNotificationPrefs,
+  writeNotificationPrefs,
+} from '../core/notifications';
 import { computeWorkspacePayrollPreview } from '../core/payrollEngine';
 import { resolveSubscriptionState, SUBSCRIPTION_PRICE_CENTS } from '../core/subscription';
+import { exportPayslipPdf, PayslipLineInput } from '../utils/pdfExporter';
 import {
   collection,
   onSnapshot,
@@ -760,6 +784,7 @@ export function TeamPage({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingMember, setEditingMember] = useState<WorkspaceMember | null>(null);
   const [payoutPeriod, setPayoutPeriod] = useState<PayrollPeriod | null>(null);
+  const [inspectPeriod, setInspectPeriod] = useState<PayrollPeriod | null>(null);
   const [payoutAccountId, setPayoutAccountId] = useState(data.accounts[0]?.id || '');
   const [payoutRub, setPayoutRub] = useState('');
 
@@ -1052,15 +1077,36 @@ export function TeamPage({
           <div className="divide-y divide-[var(--line)] mt-2 text-sm">
             {previewLines.map((line) => (
               <div key={line.memberId} className="py-3 flex items-center justify-between gap-3">
-                <div>
-                  <div className="font-medium">{line.memberName}</div>
+                <div className="min-w-0">
+                  <div className="font-medium truncate">{line.memberName}</div>
                   <div className="text-xs text-[var(--muted)] tabular-nums">
                     {line.minutes} мин · {line.ordersCount} заказов
                     {line.needsReview ? ' · Требует проверки ставки' : ''}
                   </div>
                 </div>
-                <div className="font-semibold tabular-nums">
-                  {formatMoneyCents(line.amountCents, hideAmounts)}
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="font-semibold tabular-nums">
+                    {formatMoneyCents(line.amountCents, hideAmounts)}
+                  </div>
+                  <button
+                    type="button"
+                    title="Скачать расчётный листок PDF"
+                    onClick={async () => {
+                      const mem = data.members.find((m) => m.id === line.memberId) || null;
+                      const fileName = await exportPayslipPdf({
+                        workspace,
+                        member: mem,
+                        line: line as PayslipLineInput,
+                        startDate: monthStart,
+                        endDate: today,
+                      });
+                      onToast(`Расчётный листок сохранён: ${fileName}`);
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)] text-xs font-medium inline-flex items-center gap-1"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Листок PDF</span>
+                  </button>
                 </div>
               </div>
             ))}
@@ -1137,6 +1183,16 @@ export function TeamPage({
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    {p.lines && p.lines.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setInspectPeriod(p)}
+                        className="px-3 py-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)] text-xs font-medium inline-flex items-center gap-1"
+                      >
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span>Листки ({p.lines.length})</span>
+                      </button>
+                    )}
                     {unpaid > 0 && (
                       <button
                         type="button"
@@ -1227,6 +1283,68 @@ export function TeamPage({
               Выплатить и провести расход
             </button>
           </form>
+        )}
+      </Drawer>
+
+      {/* Period Payslips Drawer */}
+      <Drawer
+        open={Boolean(inspectPeriod)}
+        title="Расчётные листки по ведомости"
+        subtitle={inspectPeriod?.title}
+        onClose={() => setInspectPeriod(null)}
+      >
+        {inspectPeriod && (
+          <div className="space-y-3">
+            <div className="p-3 rounded-xl bg-[var(--soft)] text-xs flex flex-wrap items-center justify-between gap-2 tabular-nums">
+              <span>Период: {inspectPeriod.startDate} — {inspectPeriod.endDate}</span>
+              <span>
+                Начислено: {formatMoneyCents(inspectPeriod.totalAccruedCents, hideAmounts)} · Выплачено:{' '}
+                {formatMoneyCents(inspectPeriod.totalPaidCents || 0, hideAmounts)}
+              </span>
+            </div>
+            <div className="divide-y divide-[var(--line)] text-sm">
+              {(inspectPeriod.lines || []).map((line) => (
+                <div
+                  key={line.memberId}
+                  className="py-3 flex items-center justify-between gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="font-medium truncate">{line.memberName}</div>
+                    <div className="text-xs text-[var(--muted)] tabular-nums">
+                      {PAY_RU[line.payType as PayType] || line.payType} · {line.minutes} мин ·{' '}
+                      {line.ordersCount} заказов
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="font-semibold tabular-nums">
+                      {formatMoneyCents(line.amountCents, hideAmounts)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const mem = data.members.find((m) => m.id === line.memberId) || null;
+                        const fileName = await exportPayslipPdf({
+                          workspace,
+                          member: mem,
+                          line: line as PayslipLineInput,
+                          startDate: inspectPeriod.startDate,
+                          endDate: inspectPeriod.endDate,
+                          periodTitle: inspectPeriod.title,
+                          periodPaidCents: inspectPeriod.totalPaidCents || 0,
+                          periodTotalAccruedCents: inspectPeriod.totalAccruedCents,
+                        });
+                        onToast(`Расчётный листок сохранён: ${fileName}`);
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg border border-[var(--line)] hover:bg-[var(--soft)] text-xs font-medium inline-flex items-center gap-1"
+                    >
+                      <FileDown className="w-3.5 h-3.5" />
+                      <span>PDF</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </Drawer>
 
@@ -1529,6 +1647,44 @@ export function SettingsPage({
     counts: Record<string, number>;
     parsedData: Partial<Record<keyof WorkspaceSnapshot, Array<Record<string, unknown>>>>;
   } | null>(null);
+
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPrefs>(() =>
+    readNotificationPrefs(workspace.id),
+  );
+  useEffect(() => {
+    setNotifPrefs(readNotificationPrefs(workspace.id));
+  }, [workspace.id]);
+
+  const updateNotifPrefs = (patch: Partial<NotificationPrefs>) => {
+    const next: NotificationPrefs = { ...notifPrefs, ...patch };
+    setNotifPrefs(next);
+    writeNotificationPrefs(workspace.id, next);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sweet-notif-prefs-changed'));
+    }
+  };
+
+  const activeAlerts = useMemo(
+    () =>
+      buildWorkspaceAlerts({
+        orders: data.orders,
+        workItems: data.workItems,
+        inventoryItems: data.inventoryItems,
+        stockLots: data.stockLots,
+        locations: data.locations,
+        prefs: notifPrefs,
+      }),
+    [data.orders, data.workItems, data.inventoryItems, data.stockLots, data.locations, notifPrefs],
+  );
+
+  const telegramDigest = useMemo(
+    () =>
+      formatTelegramDigestText({
+        workspaceName: workspace.name,
+        alerts: activeAlerts,
+      }),
+    [workspace.name, activeAlerts],
+  );
 
   const handleToggleModule = async (id: string, visible: boolean) => {
     const next = visible
@@ -2296,6 +2452,111 @@ export function SettingsPage({
             </Card>
           );
         })()}
+
+        <Card className="lg:col-span-2 space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <h2 className="text-base font-semibold inline-flex items-center gap-2">
+                <Bell className="w-4 h-4 text-[var(--muted)]" />
+                <span>Уведомления о выдачах, задачах и остатках</span>
+              </h2>
+              <p className="text-xs text-[var(--muted)]">
+                Активных напоминаний по выбранным категориям: <span className="font-semibold text-[var(--ink)]">{activeAlerts.length}</span>. Push-уведомления работают локально в браузере, а сводку можно отправить в Telegram.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  if (typeof Notification === 'undefined') {
+                    onToast('Браузер не поддерживает системные уведомления');
+                    return;
+                  }
+                  if (Notification.permission === 'denied') {
+                    onToast('Разрешение уведомлений отклонено в настройках браузера');
+                    return;
+                  }
+                  const perm =
+                    Notification.permission === 'granted'
+                      ? 'granted'
+                      : await Notification.requestPermission();
+                  if (perm === 'granted') {
+                    updateNotifPrefs({ browserEnabled: !notifPrefs.browserEnabled });
+                    if (!notifPrefs.browserEnabled) {
+                      new Notification(`SweetStudio · ${workspace.name}`, {
+                        body:
+                          activeAlerts[0]?.title ||
+                          'Напоминания о выдачах и остатках включены',
+                      });
+                    }
+                  } else {
+                    onToast('Разрешите уведомления в браузере для напоминаний');
+                  }
+                }}
+                className={`min-h-[38px] px-3.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 ${
+                  notifPrefs.browserEnabled
+                    ? 'border-[var(--accent)] bg-[var(--soft)] text-[var(--ink)]'
+                    : 'border-[var(--line)] bg-[var(--bg)] hover:bg-[var(--soft)]'
+                }`}
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>
+                  {notifPrefs.browserEnabled
+                    ? 'Браузерные уведомления: Вкл'
+                    : 'Включить push в браузере'}
+                </span>
+              </button>
+              <a
+                href={buildTelegramShareUrl(telegramDigest)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[38px] px-3.5 rounded-xl bg-[var(--accent)] text-[var(--accent-ink)] text-xs font-medium inline-flex items-center gap-1.5"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>Отправить сводку в Telegram</span>
+              </a>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(telegramDigest);
+                    onToast('Сводка напоминаний скопирована в буфер');
+                  } catch {
+                    onToast('Не удалось скопировать текст');
+                  }
+                }}
+                className="min-h-[38px] px-3.5 rounded-xl border border-[var(--line)] bg-[var(--card)] hover:bg-[var(--soft)] text-xs font-medium inline-flex items-center gap-1.5"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Скопировать сводку</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+            {(
+              [
+                ['notifyOrders', 'Выдачи заказов (сегодня / завтра / просрочка)'],
+                ['notifyTasks', 'Просроченные задачи «Работы»'],
+                ['notifyStock', 'Низкие остатки в Кладовой'],
+                ['notifyExpiry', 'Истекающие сроки партий FEFO'],
+              ] as const
+            ).map(([key, label]) => (
+              <label
+                key={key}
+                className="p-3 rounded-xl border border-[var(--line)] bg-[var(--bg)] flex items-center gap-2.5 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={notifPrefs[key]}
+                  onChange={(e) => updateNotifPrefs({ [key]: e.target.checked })}
+                  className="w-4 h-4 accent-[var(--accent)] shrink-0"
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+        </Card>
 
         <Card className="lg:col-span-2 flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-1">

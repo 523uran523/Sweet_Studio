@@ -321,6 +321,7 @@
         "title": { "type": "string", "minLength": 1, "maxLength": 160 },
         "clientId": { "type": "string", "maxLength": 128 },
         "clientName": { "type": "string", "maxLength": 140 },
+        "items": { "type": "array" },
         "recipeId": { "type": "string", "maxLength": 128 },
         "recipeTitle": { "type": "string", "maxLength": 140 },
         "weightGrams": { "type": "number" },
@@ -360,6 +361,9 @@
         "priority": { "type": "string", "enum": ["low", "normal", "high"] },
         "stage": { "type": "string", "enum": ["queue", "in_progress", "done"] },
         "tags": { "type": "array" },
+        "recurrence": { "type": "string", "enum": ["none", "daily", "weekly", "biweekly", "monthly"] },
+        "seriesId": { "type": "string", "maxLength": 128 },
+        "occurrenceIndex": { "type": "integer" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

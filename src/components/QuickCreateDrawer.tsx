@@ -94,14 +94,27 @@ export function QuickCreateDrawer({
             favorite: false,
           });
         }
+        const costCents = Math.round(priceCents * 0.52);
+        const orderTitle = title.trim().slice(0, 160);
         await createWorkspaceEntity(workspace, 'orders', orderId, {
           orderNumber,
-          title: title.trim().slice(0, 160),
+          title: orderTitle,
           clientId,
           clientName: clientNameStr,
+          items: [
+            {
+              id: newId('item'),
+              recipeId: '',
+              recipeTitle: orderTitle,
+              qty: 1,
+              weightGrams: 1500,
+              priceCents,
+              costCents,
+            },
+          ],
           weightGrams: 1500,
           priceCents,
-          costCents: Math.round(priceCents * 0.52),
+          costCents,
           prepaymentCents: Math.round(priceCents * 0.5),
           paidCents: 0,
           status: 'confirmed',

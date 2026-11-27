@@ -157,8 +157,19 @@ export function RecipesPage({
 
     await createWorkspaceEntity(workspace, 'orders', ordId, {
       orderNumber: num,
-      title: `${r.title} (${Math.round(targetWeightGrams)} г)`,
+      title: `${r.title} (${Math.round(targetWeightGrams)} г)`.slice(0, 160),
       clientName: 'Новый клиент',
+      items: [
+        {
+          id: newId('item'),
+          recipeId: r.id,
+          recipeTitle: r.title.slice(0, 160),
+          qty: 1,
+          weightGrams: targetWeightGrams,
+          priceCents: scaledPrice,
+          costCents: scaledCost,
+        },
+      ],
       recipeId: r.id,
       recipeTitle: r.title,
       weightGrams: targetWeightGrams,
